@@ -201,7 +201,7 @@ services:
 networks:
   botnet:
     name: kraken-bot-network
-    driver: bridge
+    driver: overlay
 
 # ============================================================
 # VOLUMES
