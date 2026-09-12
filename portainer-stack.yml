@@ -152,8 +152,7 @@ services:
         delay: 10s
         max_attempts: 3
     depends_on:
-      freqtrade:
-        condition: service_healthy
+      - freqtrade
 
   # ============================================================
   # BACKUP SIDECAR - Custom Image (Built via CI/CD)
