@@ -1,0 +1,71 @@
+# AI Orchestrator Configuration
+# This file is mounted at /app/config/ai_orchestrator.yaml
+
+model: "nvidia/nemotron-3-ultra-550b-a55b:free"
+fallback_models:
+  - "deepseek/deepseek-chat"
+  - "google/gemini-flash-1.5"
+  - "anthropic/claude-3.5-haiku"
+
+plugins:
+  strategy_generator:
+    enabled: true
+    schedule: "0 2 * * 0"  # Weekly Sunday 2 AM
+    config:
+      max_strategies: 3
+      risk_profile: "moderate"
+      min_backtest_sharpe: 1.0
+      min_backtest_trades: 50
+      model: "nvidia/nemotron-3-ultra-550b-a55b:free"
+    priority: 10
+
+  market_analyst:
+    enabled: true
+    schedule: "*/15 * * * *"  # Every 15 minutes
+    config:
+      sources: ["technical", "fear_greed", "news"]
+      pairs: []  # Empty = all whitelist
+      regime_threshold: 0.6
+    priority: 20
+
+  param_optimizer:
+    enabled: true
+    schedule: "0 */6 * * *"  # Every 6 hours
+    config:
+      trigger: "performance_drop"
+      performance_threshold: 1.0  # Sharpe ratio
+      min_trades_for_analysis: 30
+      max_suggestions: 5
+      auto_apply: false  # Requires approval
+    priority: 30
+
+  nl_config:
+    enabled: true
+    # No schedule - event driven
+    config:
+      auto_apply_safe: false
+      require_approval_for:
+        - "risk_change"
+        - "whitelist_change"
+        - "strategy_change"
+        - "stoploss_change"
+        - "position_size_change"
+        - "bot_control"
+    priority: 100  # Highest - handles user commands
+
+  autonomous_agent:
+    enabled: false  # DANGEROUS - requires explicit opt-in
+    config:
+      explicitly_enabled: false
+      require_confirmation: true
+      max_position_pct: 0.02
+      max_daily_trades: 10
+      allowed_pairs: []
+      max_drawdown_pct: 0.10
+    priority: 50
+
+safety:
+  max_daily_trades: 50
+  max_drawdown_pct: 0.15
+  require_human_approval: true
+  audit_log_retention_days: 365

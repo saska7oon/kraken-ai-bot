@@ -1,0 +1,59 @@
+# Secrets - NEVER COMMIT
+secrets/
+*.key
+*.pem
+*.crt
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+**/logs/
+
+# Data
+data/
+user_data/data/
+user_data/logs/
+
+# Backup temp
+/tmp/backup/
+backup_temp/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated strategies
+config/strategies/generated/
+
+# Audit logs
+**/audit/

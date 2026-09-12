@@ -1,0 +1,74 @@
+name: Notify Portainer Stack Update
+
+# Triggered manually or via workflow_dispatch from build.yml
+# Requires Portainer API credentials in repository secrets
+
+on:
+  workflow_dispatch:
+    inputs:
+      stack_id:
+        description: 'Portainer Stack ID'
+        required: true
+        type: string
+      environment:
+        description: 'Environment (production/staging)'
+        required: true
+        type: choice
+        options: [production, staging]
+      image_tag:
+        description: 'Image tag to deploy (default: latest)'
+        required: false
+        type: string
+        default: 'latest'
+
+jobs:
+  notify-portainer:
+    name: Trigger Portainer Stack Redeploy
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Validate Portainer Configuration
+        run: |
+          if [ -z "${{ secrets.PORTAINER_API_URL }}" ]; then
+            echo "ERROR: PORTAINER_API_URL not configured in repository secrets"
+            exit 1
+          fi
+          if [ -z "${{ secrets.PORTAINER_API_TOKEN }}" ]; then
+            echo "ERROR: PORTAINER_API_TOKEN not configured in repository secrets"
+            exit 1
+          fi
+          echo "Portainer API configured"
+
+      - name: Trigger Stack Update via Webhook
+        id: webhook
+        run: |
+          STACK_ID="${{ github.event.inputs.stack_id }}"
+          WEBHOOK_URL="${{ secrets.PORTAINER_API_URL }}/api/stacks/${STACK_ID}/webhook"
+          
+          echo "Triggering Portainer stack update for stack: $STACK_ID"
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$WEBHOOK_URL" \
+            -H "Authorization: Bearer ${{ secrets.PORTAINER_API_TOKEN }}" \
+            -H "Content-Type: application/json")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          
+          echo "Response: $BODY"
+          echo "HTTP Code: $HTTP_CODE"
+          
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Stack update triggered successfully"
+          else
+            echo "Failed to trigger stack update"
+            exit 1
+          fi
+
+      - name: Wait for Stack Convergence (Optional)
+        if: false  # Set to true if you want to wait
+        run: |
+          echo "Waiting for stack to converge..."
+          # This would require polling Portainer API for stack status
+          # Implementation depends on Portainer version
+          sleep 60
+          echo "Stack update likely complete"

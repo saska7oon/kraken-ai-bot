@@ -1,0 +1,288 @@
+version: '3.8'
+
+services:
+  # ============================================================
+  # FREQTRADE - Core Trading Engine
+  # ============================================================
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable
+    container_name: kraken-freqtrade
+    restart: unless-stopped
+    # Mount configs and user data
+    volumes:
+      - ./config:/freqtrade/user_data/config:ro
+      - ./config/strategies:/freqtrade/user_data/strategies:ro
+      - freqtrade_data:/freqtrade/user_data/data
+      - freqtrade_logs:/freqtrade/user_data/logs
+    # Environment variables from Docker secrets
+    environment:
+      # Exchange credentials (from secrets)
+      - FREQTRADE__EXCHANGE__API_KEY_FILE=/run/secrets/kraken_api_key
+      - FREQTRADE__EXCHANGE__SECRET_FILE=/run/secrets/kraken_api_secret
+      # API authentication (from secrets)
+      - FREQTRADE__API_SERVER__USERNAME=freqtrade
+      - FREQTRADE__API_SERVER__PASSWORD_FILE=/run/secrets/freqtrade_api_password
+      # Encryption key for config (from secrets)
+      - FREQTRADE__CONFIG__ENCRYPT_KEY_FILE=/run/secrets/freqtrade_encrypt_key
+      # Discord webhook (from secrets, optional)
+      - FREQTRADE__DISCORD__WEBHOOK_URL_FILE=/run/secrets/discord_webhook
+      # Timezone
+      - TZ=America/Toronto
+    # Docker secrets
+    secrets:
+      - kraken_api_key
+      - kraken_api_secret
+      - freqtrade_api_password
+      - freqtrade_encrypt_key
+      - discord_webhook
+    # Network
+    networks:
+      - botnet
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # ============================================================
+  # FREQUI - Web UI (separate container for flexibility)
+  # ============================================================
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable
+    container_name: kraken-freqtrade
+    restart: unless-stopped
+    command: >
+      trade
+      --config /freqtrade/user_data/config/base.yaml
+      --config /freqtrade/user_data/config/canada_kraken.yaml
+      --strategy ModerateMultiPairStrategy
+    volumes:
+      - ./config:/freqtrade/user_data/config:ro
+      - ./config/strategies:/freqtrade/user_data/strategies:ro
+      - freqtrade_data:/freqtrade/user_data/data
+      - freqtrade_logs:/freqtrade/user_data/logs
+    environment:
+      - FREQTRADE__EXCHANGE__API_KEY_FILE=/run/secrets/kraken_api_key
+      - FREQTRADE__EXCHANGE__SECRET_FILE=/run/secrets/kraken_api_secret
+      - FREQTRADE__API_SERVER__USERNAME=freqtrade
+      - FREQTRADE__API_SERVER__PASSWORD_FILE=/run/secrets/freqtrade_api_password
+      - FREQTRADE__CONFIG__ENCRYPT_KEY_FILE=/run/secrets/freqtrade_encrypt_key
+      - FREQTRADE__DISCORD__WEBHOOK_URL_FILE=/run/secrets/discord_webhook
+      - TZ=America/Toronto
+    secrets:
+      - kraken_api_key
+      - kraken_api_secret
+      - freqtrade_api_password
+      - freqtrade_encrypt_key
+      - discord_webhook
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # FreqUI runs as a separate command on the same image
+  # but we'll use a separate service for clarity
+  freqtrade_ui:
+    image: freqtradeorg/freqtrade:stable
+    container_name: kraken-freqtrade-ui
+    restart: unless-stopped
+    command: >
+      webserver
+      --config /freqtrade/user_data/config/base.yaml
+      --config /freqtrade/user_data/config/canada_kraken.yaml
+    volumes:
+      - ./config:/freqtrade/user_data/config:ro
+      - ./config/strategies:/freqtrade/user_data/strategies:ro
+      - freqtrade_data:/freqtrade/user_data/data
+      - freqtrade_logs:/freqtrade/user_data/logs
+    environment:
+      - FREQTRADE__EXCHANGE__API_KEY_FILE=/run/secrets/kraken_api_key
+      - FREQTRADE__EXCHANGE__SECRET_FILE=/run/secrets/kraken_api_secret
+      - FREQTRADE__API_SERVER__USERNAME=freqtrade
+      - FREQTRADE__API_SERVER__PASSWORD_FILE=/run/secrets/freqtrade_api_password
+      - FREQTRADE__CONFIG__ENCRYPT_KEY_FILE=/run/secrets/freqtrade_encrypt_key
+      - TZ=America/Toronto
+    secrets:
+      - kraken_api_key
+      - kraken_api_secret
+      - freqtrade_api_password
+      - freqtrade_encrypt_key
+    networks:
+      - botnet
+    ports:
+      - "8081:8081"  # FreqUI port
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/api/v1/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # ============================================================
+  # AI ORCHESTRATOR - Custom Python Service
+  # ============================================================
+  ai_orchestrator:
+    build:
+      context: ./ai_orchestrator
+      dockerfile: Dockerfile
+    container_name: kraken-ai-orchestrator
+    restart: unless-stopped
+    volumes:
+      - ./config/ai_orchestrator.yaml:/app/config/ai_orchestrator.yaml:ro
+      - ai_orchestrator_logs:/app/logs
+    environment:
+      # OpenRouter API key (from secrets)
+      - OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key
+      # Freqtrade API connection
+      - FREQTRADE_API_URL=http://freqtrade:8080
+      - FREQTRADE_API_USERNAME=freqtrade
+      - FREQTRADE_API_PASSWORD_FILE=/run/secrets/freqtrade_api_password
+      # Discord webhook for AI notifications (optional, from secrets)
+      - DISCORD_WEBHOOK_URL_FILE=/run/secrets/discord_webhook
+      # Timezone
+      - TZ=America/Toronto
+    secrets:
+      - openrouter_api_key
+      - freqtrade_api_password
+      - discord_webhook
+    networks:
+      - botnet
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    depends_on:
+      freqtrade:
+        condition: service_healthy
+
+  # ============================================================
+  # BACKUP SIDECAR - Encrypted backup to Nextcloud
+  # ============================================================
+  backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+    container_name: kraken-backup
+    restart: unless-stopped
+    volumes:
+      - freqtrade_data:/data/freqtrade:ro
+      - freqtrade_logs:/data/logs:ro
+      - ./config:/data/config:ro
+      - backup_temp:/tmp/backup
+    environment:
+      # Nextcloud WebDAV credentials (from secrets)
+      - NEXTCLOUD_URL_FILE=/run/secrets/nextcloud_url
+      - NEXTCLOUD_USER_FILE=/run/secrets/nextcloud_user
+      - NEXTCLOUD_PASS_FILE=/run/secrets/nextcloud_pass
+      # Encryption password (from secrets)
+      - BACKUP_ENCRYPT_KEY_FILE=/run/secrets/backup_encrypt_key
+      # Schedule: daily at 3 AM
+      - BACKUP_SCHEDULE=0 3 * * *
+      # Retention: keep 30 daily, 12 monthly
+      - BACKUP_RETENTION_DAILY=30
+      - BACKUP_RETENTION_MONTHLY=12
+      - TZ=America/Toronto
+    secrets:
+      - nextcloud_url
+      - nextcloud_user
+      - nextcloud_pass
+      - backup_encrypt_key
+    networks:
+      - botnet
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+# ============================================================
+# NETWORKS
+# ============================================================
+networks:
+  botnet:
+    name: kraken-bot-network
+    driver: bridge
+
+# ============================================================
+# VOLUMES
+# ============================================================
+volumes:
+  freqtrade_data:
+    name: kraken-freqtrade-data
+  freqtrade_logs:
+    name: kraken-freqtrade-logs
+  ai_orchestrator_logs:
+    name: kraken-ai-orchestrator-logs
+  backup_temp:
+    name: kraken-backup-temp
+
+# ============================================================
+# SECRETS (User must create files in ./secrets/)
+# ============================================================
+secrets:
+  kraken_api_key:
+    file: ./secrets/kraken_api_key.txt
+  kraken_api_secret:
+    file: ./secrets/kraken_api_secret.txt
+  openrouter_api_key:
+    file: ./secrets/openrouter_api_key.txt
+  freqtrade_api_password:
+    file: ./secrets/freqtrade_api_password.txt
+  freqtrade_encrypt_key:
+    file: ./secrets/freqtrade_encrypt_key.txt
+  discord_webhook:
+    file: ./secrets/discord_webhook.txt
+  nextcloud_url:
+    file: ./secrets/nextcloud_url.txt
+  nextcloud_user:
+    file: ./secrets/nextcloud_user.txt
+  nextcloud_pass:
+    file: ./secrets/nextcloud_pass.txt
+  backup_encrypt_key:
+    file: ./secrets/backup_encrypt_key.txt

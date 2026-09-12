@@ -1,0 +1,202 @@
+version: '3.8'
+
+# Standalone Docker Compose for Single-Host Deployment (No Swarm/Portainer Secrets)
+# Reads all secrets from .env file in same directory
+# Deploy via: Portainer Stack (Repository method) OR `docker compose up -d` on host
+
+services:
+  # ============================================================
+  # FREQTRADE - Core Trading Engine (Official Image)
+  # ============================================================
+  freqtrade:
+    image: freqtradeorg/freqtrade:stable
+    container_name: kraken-freqtrade
+    restart: unless-stopped
+    command: >
+      trade
+      --config /freqtrade/user_data/config/base.yaml
+      --config /freqtrade/user_data/config/canada_kraken.yaml
+      --strategy ModerateMultiPairStrategy
+    volumes:
+      - ./config:/freqtrade/user_data/config:ro
+      - ./config/strategies:/freqtrade/user_data/strategies:ro
+      - freqtrade_data:/freqtrade/user_data/data
+      - freqtrade_logs:/freqtrade/user_data/logs
+    env_file: .env
+    environment:
+      - FREQTRADE__EXCHANGE__API_KEY=${KRAKEN_API_KEY}
+      - FREQTRADE__EXCHANGE__SECRET=${KRAKEN_API_SECRET}
+      - FREQTRADE__API_SERVER__USERNAME=freqtrade
+      - FREQTRADE__API_SERVER__PASSWORD=${FREQTRADE_API_PASSWORD}
+      - FREQTRADE__CONFIG__ENCRYPT_KEY=${FREQTRADE_ENCRYPT_KEY}
+      - FREQTRADE__DISCORD__WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - TZ=${TZ}
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+
+  # ============================================================
+  # FREQUI - Web UI (Same Image, Different Command)
+  # ============================================================
+  freqtrade_ui:
+    image: freqtradeorg/freqtrade:stable
+    container_name: kraken-freqtrade-ui
+    restart: unless-stopped
+    command: >
+      webserver
+      --config /freqtrade/user_data/config/base.yaml
+      --config /freqtrade/user_data/config/canada_kraken.yaml
+    volumes:
+      - ./config:/freqtrade/user_data/config:ro
+      - ./config/strategies:/freqtrade/user_data/strategies:ro
+      - freqtrade_data:/freqtrade/user_data/data
+      - freqtrade_logs:/freqtrade/user_data/logs
+    env_file: .env
+    environment:
+      - FREQTRADE__EXCHANGE__API_KEY=${KRAKEN_API_KEY}
+      - FREQTRADE__EXCHANGE__SECRET=${KRAKEN_API_SECRET}
+      - FREQTRADE__API_SERVER__USERNAME=freqtrade
+      - FREQTRADE__API_SERVER__PASSWORD=${FREQTRADE_API_PASSWORD}
+      - FREQTRADE__CONFIG__ENCRYPT_KEY=${FREQTRADE_ENCRYPT_KEY}
+      - TZ=${TZ}
+    networks:
+      - botnet
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/api/v1/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+
+  # ============================================================
+  # AI ORCHESTRATOR - Custom Image (Built via CI/CD)
+  # ============================================================
+  ai_orchestrator:
+    image: ${AI_ORCHESTRATOR_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER}/kraken-ai-orchestrator:latest}
+    container_name: kraken-ai-orchestrator
+    restart: unless-stopped
+    volumes:
+      - ./config/ai_orchestrator.yaml:/app/config/ai_orchestrator.yaml:ro
+      - ai_orchestrator_logs:/app/logs
+    env_file: .env
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - FREQTRADE_API_URL=http://freqtrade:8080
+      - FREQTRADE_API_USERNAME=freqtrade
+      - FREQTRADE_API_PASSWORD=${FREQTRADE_API_PASSWORD}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - TZ=${TZ}
+    networks:
+      - botnet
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+    depends_on:
+      freqtrade:
+        condition: service_healthy
+
+  # ============================================================
+  # BACKUP SIDECAR - Custom Image (Built via CI/CD)
+  # ============================================================
+  backup:
+    image: ${BACKUP_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER}/kraken-backup:latest}
+    container_name: kraken-backup
+    restart: unless-stopped
+    volumes:
+      - freqtrade_data:/data/freqtrade:ro
+      - freqtrade_logs:/data/logs:ro
+      - ./config:/data/config:ro
+      - backup_temp:/tmp/backup
+    env_file: .env
+    environment:
+      - NEXTCLOUD_URL=${NEXTCLOUD_URL}
+      - NEXTCLOUD_USER=${NEXTCLOUD_USER}
+      - NEXTCLOUD_PASS=${NEXTCLOUD_PASS}
+      - BACKUP_ENCRYPT_KEY=${BACKUP_ENCRYPT_KEY}
+      - BACKUP_SCHEDULE=0 3 * * *
+      - BACKUP_RETENTION_DAILY=30
+      - BACKUP_RETENTION_MONTHLY=12
+      - TZ=${TZ}
+    networks:
+      - botnet
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+
+# ============================================================
+# NETWORKS
+# ============================================================
+networks:
+  botnet:
+    name: kraken-bot-network
+    driver: bridge
+
+# ============================================================
+# VOLUMES
+# ============================================================
+volumes:
+  freqtrade_data:
+    name: kraken-freqtrade-data
+  freqtrade_logs:
+    name: kraken-freqtrade-logs
+  ai_orchestrator_logs:
+    name: kraken-ai-orchestrator-logs
+  backup_temp:
+    name: kraken-backup-temp
