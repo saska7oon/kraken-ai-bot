@@ -17,7 +17,6 @@ TZ="${TZ:-UTC}"
 SOURCE_DIRS=(
     "/data/freqtrade"
     "/data/logs"
-    "/data/config"
 )
 
 BACKUP_ROOT="/tmp/backup"
@@ -75,6 +74,10 @@ pass = $(rclone obscure "$pass" 2>/dev/null || echo "$pass")
 EOF
 
     log "rclone configured for Nextcloud"
+
+    # Create remote backup directory if it doesn't exist
+    rclone mkdir "nextcloud:backups" 2>/dev/null || true
+    rclone mkdir "nextcloud:backups/daily" 2>/dev/null || true
 }
 
 # Encrypt and upload a directory
