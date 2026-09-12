@@ -112,7 +112,7 @@ services:
   # AI ORCHESTRATOR - Custom Image (Built via CI/CD)
   # ============================================================
   ai_orchestrator:
-    image: ${AI_ORCHESTRATOR_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER}/kraken-ai-orchestrator:latest}
+    image: ${AI_ORCHESTRATOR_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kraken-ai-orchestrator:latest}
     container_name: kraken-ai-orchestrator
     restart: unless-stopped
     volumes:
@@ -158,7 +158,7 @@ services:
   # BACKUP SIDECAR - Custom Image (Built via CI/CD)
   # ============================================================
   backup:
-    image: ${BACKUP_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER}/kraken-backup:latest}
+    image: ${BACKUP_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kraken-backup:latest}
     container_name: kraken-backup
     restart: unless-stopped
     volumes:
