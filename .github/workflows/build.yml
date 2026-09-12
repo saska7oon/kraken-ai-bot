@@ -60,6 +60,7 @@ jobs:
             ${{ github.event.inputs.tag_suffix && format('type=raw,value={0}', github.event.inputs.tag_suffix) || '' }}
 
       - name: Build and push AI Orchestrator
+        id: build-orchestrator
         uses: docker/build-push-action@v5
         with:
           context: ./ai_orchestrator
@@ -113,6 +114,7 @@ jobs:
             ${{ github.event.inputs.tag_suffix && format('type=raw,value={0}', github.event.inputs.tag_suffix) || '' }}
 
       - name: Build and push Backup Sidecar
+        id: build-backup
         uses: docker/build-push-action@v5
         with:
           context: ./backup
