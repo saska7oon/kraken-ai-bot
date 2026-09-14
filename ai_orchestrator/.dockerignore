@@ -1,0 +1,28 @@
+# Ignore build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+.tox/
+.venv/
+venv/
+ENV/
+
+# Ignore IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore secrets
+.env*
+secrets/
+
+# Ignore git
+.git/
+.gitignore
+
+# DO NOT ignore the package source
+# !ai_orchestrator/
