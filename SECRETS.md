@@ -9,6 +9,7 @@
 | `openrouter_api_key` | Text | OpenRouter API Key | ✅ Yes | `sk-or-v1-abc123...` |
 | `freqtrade_api_password` | Text | Freqtrade REST API Password | ✅ Yes | `openssl rand -base64 32` |
 | `freqtrade_encrypt_key` | Text | Freqtrade Config Encryption Key | ✅ Yes | `openssl rand -base64 32` |
+| `orchestrator_api_token` | Text | Bearer token for the AI orchestrator API | ✅ Yes | `openssl rand -base64 48` |
 | `discord_webhook` | Text | Discord Webhook URL | ❌ Optional | `https://discord.com/api/webhooks/...` |
 | `nextcloud_url` | Text | Nextcloud WebDAV Backup URL | ❌ Optional | `https://cloud.example.com/remote.php/dav/files/user/backups` |
 | `nextcloud_user` | Text | Nextcloud Username | ❌ Optional | `backupuser` |
@@ -27,7 +28,8 @@ Run on your local machine to generate secure values:
 # Generate all required random secrets
 openssl rand -base64 32  # freqtrade_api_password
 openssl rand -base64 32  # freqtrade_encrypt_key
-openssl rand -base64 32  # backup_encrypt_key
+openssl rand -base64 48  # orchestrator_api_token
+openssl rand -base64 32  # backup_encrypt_key (only if not using age-keygen below)
 
 # For Age encryption key (backup):
 # Install age: brew install age / apt install age / apk add age
@@ -145,8 +147,9 @@ Consequences:
   which never contain credentials.
 
 The AI orchestrator reads `/run/secrets/openrouter_api_key`,
-`/run/secrets/freqtrade_api_password` and `/run/secrets/discord_webhook`
-directly in `main.py`. It never receives Kraken credentials.
+`/run/secrets/freqtrade_api_password`, `/run/secrets/discord_webhook` and
+`/run/secrets/orchestrator_api_token` directly in `main.py`. It never receives
+Kraken credentials.
 
 **Non-secret config is delivered as Swarm configs** (not bind mounts), because
 Portainer's repository mode resolves relative bind paths under
@@ -157,9 +160,96 @@ directory.
 |--------------|-------------|------------|
 | `freqtrade_base_config` | `config/base.yaml` | `/freqtrade/user_data/base.yaml` |
 | `freqtrade_canada_config` | `config/canada_kraken.yaml` | `/freqtrade/user_data/canada_kraken.yaml` |
-| `freqtrade_strategy` | `config/strategies/moderate_multi.py` | `/freqtrade/user_data/moderate_multi.py` |
+| `freqtrade_strategy` | `config/strategies/moderate_multi.py` | `/etc/freqtrade-strategies/moderate_multi.py` |
 | `freqtrade_entrypoint` | `config/freqtrade-entrypoint.sh` | `/etc/freqtrade-entrypoint.sh` |
 | `freqtrade_ai_config` | `config/ai_orchestrator.yaml` | `/app/config/ai_orchestrator.yaml` |
+
+> The strategy is staged to `/etc/freqtrade-strategies/` rather than directly
+> into the strategies directory, because Swarm configs are **read-only** and
+> freqtrade needs a writable strategies directory (see below). The entrypoint
+> copies it into place on every start.
+
+### The shared strategies volume
+
+`strategies_shared` (Docker volume `kraken-strategies-shared`) is mounted at:
+
+| Container | Path |
+|-----------|------|
+| `freqtrade` | `/freqtrade/user_data/strategies` |
+| `ai_orchestrator` | `/app/strategies` |
+
+This is what allows a proposed strategy to be **backtested before the operator
+is asked to approve it**. The orchestrator writes candidates there; freqtrade
+reads them and runs the backtest over the REST API.
+
+AI proposals are named `proposal_<timestamp>_<name>.py`, so they can never
+overwrite or shadow `moderate_multi.py`. Both containers run as uid 1000, so
+file ownership is consistent. **Activating** a proposed strategy still means
+editing the Swarm config and redeploying — that is intentionally outside the
+AI's reach.
+
+---
+
+## Orchestrator API Authentication
+
+The AI orchestrator's HTTP API is authenticated with a **bearer token** read from
+the `orchestrator_api_token` Swarm secret.
+
+```
+Orchestrator routes
+-------------------
+/health                  -> public (liveness probe; reveals nothing)
+everything under         -> require "Authorization: Bearer <token>"
+  /api/v1/...
+```
+
+If `orchestrator_api_token` does not exist, the service **fails closed**: every
+authenticated route returns `503` with an explanation, and it logs a
+`SECURITY:` line at startup. It will not run open by accident.
+
+Create it with:
+
+```bash
+openssl rand -base64 48
+```
+
+and store the output as the `orchestrator_api_token` Swarm secret. Then:
+
+```bash
+curl -H "Authorization: Bearer <token>" http://<host>:8082/api/v1/status
+```
+
+The orchestrator port is **not published to the host**. To reach the API, tunnel
+in explicitly rather than exposing it:
+
+```bash
+# From your machine, forward the port through the Pi
+ssh -L 8082:localhost:8082 <user>@<pi-host>
+```
+
+or run a throwaway container on the swarm network:
+
+```bash
+docker run --rm -it --network kraken-bot-network curlimages/curl \
+  -H "Authorization: Bearer <token>" http://ai_orchestrator:8082/api/v1/status
+```
+
+### What the token does and does not gate
+
+| Action | Requires token | Requires a second human step |
+|--------|----------------|------------------------------|
+| Read status, trades, performance | yes | no |
+| Pause / resume trading | yes | no |
+| Restrict traded pairs (runtime) | yes | no |
+| Propose a configuration change | yes | **yes** — edit the Swarm config |
+| Apply a configuration change | — | **not possible via the API** |
+| Switch dry-run to live | — | **not possible via the API** |
+| Enable autonomous AI trading | — | **yes** — edit `ai_orchestrator.yaml` |
+
+Configuration changes can only be *proposed* and *approved*. Applying one means
+editing the relevant Swarm config and redeploying, so no API token — or bug in
+the API — can silently reconfigure the bot.
+
 
 > When you change any of these files, update the corresponding Portainer config
 > and redeploy the stack. Swarm configs are immutable — edit the config (or
@@ -174,6 +264,7 @@ directory.
 | Kraken API | Quarterly | 1. Generate new on Kraken 2. Update Portainer secret 3. Redeploy stack |
 | OpenRouter | Quarterly | Same as above |
 | Freqtrade API Password | Semi-annually | Generate new → Update secret → Redeploy |
+| Orchestrator API Token | Semi-annually | Generate new → Update secret → Redeploy → Update any saved client configs |
 | Freqtrade Encrypt Key | Annually | **Warning**: Re-encrypts config. Backup first! |
 | Backup Encrypt Key | Annually | Generate new age key → Update secret → Old backups need old key |
 | Discord/Nextcloud | As needed | Update when credentials change |
@@ -185,6 +276,8 @@ directory.
 - [ ] All secrets created in Portainer (not in `.env` or files)
 - [ ] Kraken API has IP allowlist enabled
 - [ ] Kraken API has **no withdrawal permissions**
+- [ ] `orchestrator_api_token` created and set to a random value
+- [ ] Orchestrator port is **not** published to the host
 - [ ] Nextcloud uses app password (not main password)
 - [ ] Age private key stored offline (password manager, USB, paper)
 - [ ] Secrets not logged in any CI/CD output
@@ -202,6 +295,10 @@ directory.
 | Bot runs but has no exchange key | You used a `*_FILE` env var. freqtrade ignores those — use `config/freqtrade-entrypoint.sh` (see "How Secrets Reach the Containers") |
 | `bind source path does not exist` | You used a bind mount. Swarm does not create bind sources — use a Swarm config instead |
 | `ModuleNotFoundError: ai_orchestrator` | The orchestrator image was built with the wrong context. It must be built from the repo root with `file: ai_orchestrator/Dockerfile` |
+| Orchestrator returns `503` on every route | `orchestrator_api_token` is missing. This is intentional fail-closed behaviour — create the secret and redeploy (see "Orchestrator API Authentication") |
+| Orchestrator returns `401` | Missing or wrong `Authorization: Bearer <token>` header |
 | `429` / `EAPI:Rate limit exceeded` from Kraken | Raise `exchange.ccxt_async_config.rateLimit` in `config/canada_kraken.yaml` (default 3500 ms) |
+| AI features stop mid-day | OpenRouter free-tier daily budget (200/day) is spent. The bot keeps trading; AI resumes at 00:00 UTC. Check `/api/v1/explain/digest` for the remaining count |
+| `freqtrade_strategy` config not visible in the strategies dir | Expected — it is staged at `/etc/freqtrade-strategies/` and copied in by the entrypoint, because Swarm configs are read-only |
 | AI Orchestrator 401 errors | `freqtrade_api_password` mismatch between secrets |
 | Portainer shows "ConfigMap not found" | Secret name in stack ≠ secret name in Portainer |

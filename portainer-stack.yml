@@ -54,21 +54,27 @@ services:
       - --strategy
       - ModerateMultiPairStrategy
       - --strategy-path
-      - /freqtrade/user_data
+      - /freqtrade/user_data/strategies
 
     configs:
       - source: freqtrade_base_config
         target: /freqtrade/user_data/base.yaml
       - source: freqtrade_canada_config
         target: /freqtrade/user_data/canada_kraken.yaml
+      # Staged outside the strategies directory: Swarm configs are read-only, and
+      # the entrypoint needs to be able to write AI-proposed strategies alongside
+      # it. See the entrypoint's strategy-staging step.
       - source: freqtrade_strategy
-        target: /freqtrade/user_data/moderate_multi.py
+        target: /etc/freqtrade-strategies/moderate_multi.py
       - source: freqtrade_entrypoint
         target: /etc/freqtrade-entrypoint.sh
 
     volumes:
       - freqtrade_data:/freqtrade/user_data/data
       - freqtrade_logs:/freqtrade/user_data/logs
+      # Shared with the AI orchestrator so a generated strategy can actually be
+      # backtested before the operator is asked to approve it.
+      - strategies_shared:/freqtrade/user_data/strategies
 
     environment:
       - TZ=America/Toronto
@@ -122,23 +128,40 @@ services:
 
     volumes:
       - ai_orchestrator_logs:/app/logs
+      # Same volume freqtrade reads strategies from: this is what makes the
+      # backtest gate possible.
+      - strategies_shared:/app/strategies
 
     environment:
       - TZ=America/Toronto
       - FREQTRADE_API_URL=http://freqtrade:8080
       - FREQTRADE_API_USERNAME=freqtrade
+      # CORS is an explicit allow-list. Leave empty if you only use curl or
+      # Portainer; add origins only if you build a browser UI.
+      - ORCHESTRATOR_CORS_ORIGINS=
 
     # main.py reads /run/secrets/<name> directly by name.
     secrets:
       - openrouter_api_key
       - freqtrade_api_password
       - discord_webhook
+      # Bearer token for the orchestrator API. Without this secret the API
+      # refuses every request rather than running open.
+      - orchestrator_api_token
 
     networks:
       - botnet
 
-    ports:
-      - "8082:8082"
+    # Deliberately NOT published to the host.
+    #
+    # This port used to be published as "8082:8082", which exposed the
+    # orchestrator - including its approval endpoint, which could apply changes -
+    # to anything that could reach the host. It now talks only over the internal
+    # swarm network. To reach it from your machine, tunnel it explicitly:
+    #
+    #   ssh -L 8082:localhost:8082 <pi-host>   # then port-forward inside swarm
+    #
+    # or run a one-off debug container attached to kraken-bot-network.
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
@@ -227,6 +250,11 @@ volumes:
     name: kraken-ai-orchestrator-logs
   backup_temp:
     name: kraken-backup-temp
+  # Strategies visible to both freqtrade (for backtesting) and the orchestrator
+  # (for writing AI proposals). Both containers run as uid 1000, so ownership
+  # is consistent.
+  strategies_shared:
+    name: kraken-strategies-shared
 
 # =============================================================================
 # CONFIGS - create these in Portainer: Configs -> Add config
@@ -262,6 +290,7 @@ configs:
 #  nextcloud_user
 #  nextcloud_pass
 #  backup_encrypt_key
+#  orchestrator_api_token      <- required; the orchestrator API is locked without it
 # =============================================================================
 secrets:
   kraken_api_key:
@@ -283,4 +312,6 @@ secrets:
   nextcloud_pass:
     external: true
   backup_encrypt_key:
+    external: true
+  orchestrator_api_token:
     external: true

@@ -70,28 +70,24 @@ cd kraken-ai-bot
 ```
 
 ### 2. Create Secrets (ONE TIME - NEVER COMMIT)
+
+Secrets are **Docker Swarm secrets created in Portainer**, not files in this
+repository. See [SECRETS.md](SECRETS.md) for the full inventory and the
+Portainer steps. In short:
+
 ```bash
-mkdir -p secrets
-chmod 700 secrets
-
-# REQUIRED
-echo "YOUR_KRAKEN_API_KEY" > secrets/kraken_api_key.txt
-echo "YOUR_KRAKEN_API_SECRET" > secrets/kraken_api_secret.txt
-echo "YOUR_OPENROUTER_KEY" > secrets/openrouter_api_key.txt
-
-# Generate secure passwords
-openssl rand -base64 32 > secrets/freqtrade_api_password.txt
-openssl rand -base64 32 > secrets/freqtrade_encrypt_key.txt
-openssl rand -base64 32 > secrets/backup_encrypt_key.txt
-
-# OPTIONAL
-echo "https://discord.com/api/webhooks/..." > secrets/discord_webhook.txt
-echo "https://cloud.yoursite.com/remote.php/dav/files/user/backups" > secrets/nextcloud_url.txt
-echo "your_username" > secrets/nextcloud_user.txt
-echo "your_app_password" > secrets/nextcloud_pass.txt
-
-chmod 600 secrets/*
+# Generate the values locally, then paste each one into
+# Portainer -> Secrets -> Add secret
+openssl rand -base64 32   # freqtrade_api_password
+openssl rand -base64 32   # freqtrade_encrypt_key
+openssl rand -base64 48   # orchestrator_api_token
+openssl rand -base64 32   # backup_encrypt_key (or use age-keygen)
+# Kraken + OpenRouter keys come from those providers
 ```
+
+> There is no `secrets/` directory in the deployment path, and no `.env` file.
+> Credentials exist only as Swarm secrets, mounted read-only at `/run/secrets/`
+> and never placed in the environment or on disk.
 
 ### 3. Configure Kraken API
 1. Log into [Kraken Pro](https://pro.kraken.com)
@@ -118,76 +114,126 @@ docker compose ps
 docker compose logs -f
 
 # Test endpoints
-curl http://localhost:8082/health          # AI Orchestrator
-curl -u freqtrade:PASSWORD http://localhost:8081/api/v1/ping  # FreqUI
+curl -u freqtrade:PASSWORD http://localhost:8081/api/v1/ping  # FreqUI / freqtrade
+
+# The AI orchestrator is NOT published to the host. Reach it over the swarm
+# network instead (see SECRETS.md -> Orchestrator API Authentication):
+docker run --rm -it --network kraken-bot-network curlimages/curl \
+  http://ai_orchestrator:8082/health
 ```
 
 ### 6. Access Web UI
-Open http://localhost:8081
+Open http://localhost:8081 (FreqUI, served by the freqtrade container)
 - Username: `freqtrade`
-- Password: (from `secrets/freqtrade_api_password.txt`)
+- Password: (from the `freqtrade_api_password` Swarm secret)
 
 ---
 
 ## 💬 Natural Language Control
 
-**Talk to your bot via REST API:**
+All routes require the bearer token from the `orchestrator_api_token` Swarm
+secret, and the orchestrator port is not published to the host. See
+[SECRETS.md](SECRETS.md#orchestrator-api-authentication) for how to reach it.
 
 ```bash
-# Switch risk profile
-curl -X POST http://localhost:8082/api/v1/command \
-  -H "Content-Type: application/json" \
-  -d '{"command": "Switch to conservative mode"}'
-
-# Add pair to whitelist
-curl -X POST http://localhost:8082/api/v1/command \
-  -H "Content-Type: application/json" \
-  -d '{"command": "Add DOGE/CAD to whitelist"}'
+export ORCHESTRATOR_TOKEN=...   # your orchestrator_api_token secret
+# Assumes an SSH tunnel:  ssh -L 8082:localhost:8082 <user>@<pi-host>
+# The orchestrator port is not published on the host by design.
+export API=http://localhost:8082
 
 # Check status
-curl -X POST http://localhost:8082/api/v1/command \
-  -H "Content-Type: application/json" \
-  -d '{"command": "Show me the last 10 trades with P&L in CAD"}'
+curl -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" $API/api/v1/status
 
-# Explain a trade
-curl -X POST http://localhost:8082/api/v1/command \
+# Ask a plain-language question
+curl -X POST $API/api/v1/explain/ask \
+  -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"command": "Why did the bot sell ETH at 3600 CAD?"}'
+  -d '{"question": "How am I doing so far?"}'
 
-# Pause trading
-curl -X POST http://localhost:8082/api/v1/command \
-  -H "Content-Type: application/json" \
-  -d '{"command": "Pause trading for 2 hours"}'
+# Plain-language digest (works even with no AI available)
+curl -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" $API/api/v1/explain/digest
 
-# Optimize parameters
-curl -X POST http://localhost:8082/api/v1/command \
+# Confirm the safety posture: dry-run, protections, autonomous trading
+curl -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" $API/api/v1/safety
+
+# Pause trading (this one really executes)
+curl -X POST $API/api/v1/command \
+  -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"command": "Optimize parameters for current market conditions"}'
+  -d '{"command": "pause trading"}'
+
+# Explain a trade decision
+curl -X POST $API/api/v1/command \
+  -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"command": "why did the bot sell ETH?"}'
+
+# Ask for a change (returns a PROPOSAL - see below)
+curl -X POST $API/api/v1/command \
+  -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"command": "Switch to conservative mode"}'
 ```
 
-**Approval flow:** Commands that change risk/whitelist/strategy return `pending_approval`. Approve with:
+### Two kinds of command
+
+**Runtime actions execute for real.** These map onto things Freqtrade genuinely
+supports at runtime:
+
+| Command | What happens |
+|---------|--------------|
+| "pause trading" / "resume trading" | Bot stops/starts opening new trades. Open positions are still managed. |
+| "only trade BTC/CAD" | Runtime pair restriction (does not survive a restart) |
+| "show my status" / "how am I doing?" | Reads real data and explains it |
+| "why did it sell ETH?" | Explains the exit reason in plain language |
+
+**Configuration changes produce a proposal, never an application.** Freqtrade
+reads its configuration at startup and exposes no runtime config-write endpoint;
+the orchestrator cannot write the Swarm config either. So a proposal like
+"switch to conservative" comes back with the exact values to apply and
+`"proposals_applied": false`.
+
+To actually apply it: update the `freqtrade_canada_config` Swarm config in
+Portainer with those values and redeploy. Nothing changes until you do.
+
+### Approval flow
+
+Commands that alter behaviour return `pending_approval`. Approving records your
+decision in the audit log and returns the values to apply — it does not
+reconfigure the running bot, because it cannot:
+
 ```bash
-curl -X POST http://localhost:8082/api/v1/approve \
+curl -X POST $API/api/v1/approve \
+  -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"approve": true, "changes": [...]}'
 ```
 
+> The old `force: true` flag on `/api/v1/command` used to call the apply path
+> directly, silently skipping approval. It has been removed and sending it now
+> returns HTTP 422.
+
+### Frozen settings
+
+Some things can never be changed through chat or the API, at any confidence
+level. `dry_run` is the most important:
+
+> "Switching between simulation and live trading cannot be done through the AI
+> interface. This is deliberate: live mode places real orders with real money.
+> To go live you must edit the `freqtrade_canada_config` Swarm config in
+> Portainer, change `dry_run` to false, and redeploy — and you should have weeks
+> of satisfactory dry-run results first."
+
+Also frozen: `exchange.*`, `api_server.*`, `jwt_secret_key`, `ws_token`.
+
+Everything else is bounds-checked. A stop loss wider than -15% or tighter than
+-2%, or more than 5 simultaneous trades, is refused with an explanation of why.
+
 ---
-
-## 🤖 AI Plugins (All Optional)
-
-| Plugin | Schedule | Description |
-|--------|----------|-------------|
-| **strategy_generator** | Weekly (Sun 2AM) | Generates new strategies via LLM |
-| **market_analyst** | Every 15 min | Technical + sentiment analysis |
-| **param_optimizer** | Every 6 hours | Suggests hyperparameter tweaks |
-| **nl_config** | On-demand | Natural language → config |
-| **autonomous_agent** | **DISABLED** | Direct AI trading (opt-in only) |
-
-Enable/disable via config or API:
 ```bash
 curl -X POST http://localhost:8082/api/v1/plugins/strategy_generator/control \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
   -d '{"action": "disable"}'
 ```
 
@@ -200,13 +246,14 @@ curl -X POST http://localhost:8082/api/v1/plugins/strategy_generator/control \
 ┌─────────────────────────────────────────────────────────────┐
 │                    DOCKER SECRETS                            │
 ├─────────────────────────────────────────────────────────────┤
-│  kraken_api_key       → Only Freqtrade container             │
-│  kraken_api_secret    → Only Freqtrade container             │
-│  openrouter_api_key   → Only AI Orchestrator                 │
+│  kraken_api_key         → Only Freqtrade container           │
+│  kraken_api_secret      → Only Freqtrade container           │
+│  openrouter_api_key     → Only AI Orchestrator               │
 │  freqtrade_api_password → Freqtrade + AI Orchestrator        │
-│  discord_webhook      → Freqtrade + AI Orchestrator          │
-│  nextcloud_*          → Only Backup sidecar                  │
-│  backup_encrypt_key   → Only Backup sidecar                  │
+│  orchestrator_api_token → Only AI Orchestrator               │
+│  discord_webhook        → Freqtrade + AI Orchestrator        │
+│  nextcloud_*            → Only Backup sidecar                │
+│  backup_encrypt_key     → Only Backup sidecar                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -214,8 +261,66 @@ curl -X POST http://localhost:8082/api/v1/plugins/strategy_generator/control \
 - ✅ **No credentials in images, configs, logs, or environment**
 - ✅ **AI Orchestrator NEVER sees Kraken keys** - only talks to Freqtrade REST API
 - ✅ **All secrets mounted as files at `/run/secrets/`**
+- ✅ **Orchestrator API requires a bearer token; fails closed if unconfigured**
+- ✅ **Orchestrator port is not published to the host**
 - ✅ **Audit log tracks every AI action with hash chaining**
 - ✅ **Human approval required for all config changes**
+- ✅ **Switching to live trading cannot be done through the API** - it requires
+  editing a Swarm config and redeploying, outside the AI's reach
+- ✅ **The AI cannot activate a strategy** - it can only propose one that has
+  passed a safety validator and a real backtest
+
+### What the bot will not do
+These are enforced in code, not just documented:
+
+| Action | Enforced by |
+|--------|-------------|
+| Change `dry_run` via API or chat | Frozen-key refusal in `nl_config.py` |
+| Apply a config change automatically | No Freqtrade runtime config-write endpoint exists; `update_config()` raises |
+| Trade without human approval | `autonomous_agent` disabled and unreachable via API |
+| Activate a generated strategy | Activation requires a Swarm config edit |
+| Exceed the AI budget | Daily request cap in `openrouter_client.py` |
+| Run an unsafe generated strategy | `proposal_validator.py` + backtest gate |
+
+### Freqtrade protections (circuit breakers)
+
+Configured in `config/base.yaml`. These are deterministic and were previously
+**absent entirely**:
+
+| Protection | Effect |
+|------------|--------|
+| `MaxDrawdown` | Stops trading for 24h if the account loses >10% in a day |
+| `StoplossGuard` | Pauses all trading if 3 trades hit their stop loss within 8h |
+| `CooldownPeriod` | Waits 1h after an exit before opening a new trade |
+
+### AI failure is not a trading failure
+
+If OpenRouter is unreachable, the API key is missing, or the daily free-tier
+budget is spent, the orchestrator degrades to deterministic output. It never
+blocks or influences order execution — signals come from the strategy, not the
+model. `/api/v1/explain/digest` still returns a plain-language summary computed
+in Python.
+
+---
+
+## 🤖 What the AI is actually for
+
+The AI **explains and suggests**. It does not decide trades and cannot change
+the bot's configuration.
+
+| Plugin | Schedule | Cost | What it does |
+|--------|----------|------|--------------|
+| **explainer** | Daily 08:00 | 1/day | Plain-language digest: what the bot did, what the numbers mean, what needs attention. Never predicts prices or gives advice. |
+| **strategy_generator** | Weekly | ~1/week | Proposes strategies; each must pass the safety validator **and** a real backtest before it is shown to you. |
+| **market_analyst** | Hourly | 0 | Computes indicators in Python. Reports facts; the explainer narrates them on demand. |
+| **param_optimizer** | Every 6h | ~4/day | Reviews real trade statistics and suggests parameter changes for you to apply manually. |
+| **nl_config** | On-demand | per command | Runtime actions (pause/resume/restrict pairs/status) execute for real. Everything else is a proposal. |
+| **autonomous_agent** | **DISABLED** | — | Would trade without asking. Deliberately unreachable via the API. |
+
+Total scheduled AI usage is well under the 200 requests/day free-tier cap. The
+`market_analyst` plugin previously ran every 15 minutes and asked a model to
+re-derive indicators Python had already computed — roughly 96 requests/day for
+no additional signal. That is now zero.
 
 ---
 
@@ -335,9 +440,25 @@ tar -xzf backup_file.tar.gz
 ```
 
 ### Dry-run → Live
-1. Verify dry-run performance for 1-2 weeks
-2. Edit `config/canada_kraken.yaml`: `dry_run: false`
-3. `docker compose restart freqtrade freqtrade_ui`
+
+**This is the one irreversible step in the whole system, and it is deliberately
+awkward.** No AI, no API token and no chat command can do it — if any of those
+could, a bug or a bad prompt could put real money at risk.
+
+1. Run in dry-run for **weeks**, not days. Confirm the protections work: check
+   that `MaxDrawdown` and `StoplossGuard` actually paused trading at least once.
+2. Confirm you understand what the digest is telling you. If you cannot explain
+   why a trade closed, do not go live.
+3. In Portainer: **Configs → `freqtrade_canada_config` → edit** and set
+   `dry_run: false`. (Swarm configs are immutable, so this means recreating the
+   config with a new name or a new version and updating the stack reference.)
+4. Redeploy the stack.
+5. Verify: `curl -H "Authorization: Bearer $TOKEN" $API/api/v1/safety` must show
+   `"dry_run": false` and list your protections. The digest will switch from
+   "SIMULATION" to "LIVE — real money".
+
+To go back to simulation, reverse step 3. Do that immediately if anything looks
+wrong: pausing the bot stops new trades but leaves existing positions managed.
 
 ---
 
@@ -347,17 +468,23 @@ tar -xzf backup_file.tar.gz
 |-------|----------|
 | Freqtrade can't connect to Kraken | Check API key permissions, IP allowlist |
 | "Rate limit exceeded" | Increase `rateLimit` in config (3100→5000) |
+| Bot runs but places no trades | Check the Kraken key actually loaded — a `*_FILE` env var is silently ignored (see SECRETS.md) |
 | AI Orchestrator unhealthy | Check OpenRouter key, model availability |
+| Orchestrator returns 503 | `orchestrator_api_token` secret missing — intentional fail-closed |
+| Orchestrator returns 401 | Missing/wrong `Authorization: Bearer <token>` header |
+| AI stopped mid-day | Free-tier daily budget spent (200/day). Trading unaffected; resets 00:00 UTC |
 | Discord notifications not working | Verify webhook URL in secrets |
 | Backup failing | Check Nextcloud WebDAV URL, credentials |
+| Generated strategy rejected | Read the reason — the validator explains it in plain English via the audit log |
 
 ### Debug Commands
 ```bash
 # Check Freqtrade API
 curl -u freqtrade:PASS http://localhost:8080/api/v1/status
 
-# Check AI Orchestrator
-curl http://localhost:8082/health
+# Check AI Orchestrator (from inside the swarm network)
+docker run --rm -it --network kraken-bot-network curlimages/curl \
+  -H "Authorization: Bearer $TOKEN" http://ai_orchestrator:8082/api/v1/safety
 
 # Verify secrets mounted
 docker compose exec freqtrade ls /run/secrets/
@@ -407,7 +534,7 @@ In Portainer UI → **Secrets → Add Secret** (see [SECRETS.md](SECRETS.md)):
 ```
 kraken_api_key, kraken_api_secret, openrouter_api_key,
 freqtrade_api_password, freqtrade_encrypt_key, backup_encrypt_key,
-discord_webhook (optional), nextcloud_* (optional)
+orchestrator_api_token, discord_webhook (optional), nextcloud_* (optional)
 ```
 
 ### 3. Initial Deploy
@@ -472,9 +599,9 @@ deploy:
 ```
 
 ### Health Checks (Portainer Monitors)
-- `freqtrade`: `http://localhost:8080/api/v1/ping`
-- `freqtrade_ui`: `http://localhost:8081/api/v1/ping`
-- `ai_orchestrator`: `http://localhost:8082/health`
+- `freqtrade`: `http://localhost:8080/api/v1/ping` (in-container)
+- `ai_orchestrator`: `http://localhost:8082/health` (in-container; `/health` is
+  the only unauthenticated route, and it returns no configuration)
 
 ---
 

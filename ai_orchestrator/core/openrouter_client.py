@@ -8,13 +8,23 @@ import os
 import json
 import asyncio
 import logging
+import random
 from typing import Dict, List, Optional, Any, AsyncGenerator
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import aiohttp
 from aiohttp import ClientTimeout
 
 logger = logging.getLogger(__name__)
+
+
+class AIBudgetExhausted(Exception):
+    """
+    Raised when the daily AI request budget is spent.
+
+    This is an expected, non-fatal condition: the deterministic trading strategy
+    is entirely unaffected by AI availability.
+    """
 
 
 @dataclass
@@ -69,7 +79,15 @@ class ModelUsage:
 
 class OpenRouterClient:
     """
-    Async OpenRouter API client with model fallback and usage tracking.
+    Async OpenRouter API client with model fallback, usage tracking and a daily
+    request budget.
+
+    Budget note: the default configuration uses a FREE OpenRouter model with a
+    hard cap of 200 requests/day. The bot's plugins can easily exceed that, and
+    a mid-run 429 used to look like a silent failure. This client therefore
+    tracks requests per UTC day and refuses to spend more, raising
+    ``AIBudgetExhausted`` so callers can degrade gracefully instead of retrying
+    into the wall.
     """
 
     BASE_URL = "https://openrouter.ai/api/v1"
@@ -77,23 +95,28 @@ class OpenRouterClient:
     def __init__(
         self,
         api_key: str,
-        default_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free",
+        default_model: str = "",
         fallback_models: Optional[List[str]] = None,
         timeout: int = 60,
         max_retries: int = 3,
+        daily_request_budget: int = 180,
     ):
         self.api_key = api_key
         self.default_model = default_model
-        self.fallback_models = fallback_models or [
-            "deepseek/deepseek-chat",
-            "google/gemini-flash-1.5",
-            "anthropic/claude-3.5-haiku",
-        ]
+        # No invented defaults: whatever is listed in ai_orchestrator.yaml wins.
+        # Silently defaulting to paid models could charge the operator money.
+        self.fallback_models = fallback_models or []
         self.timeout = ClientTimeout(total=timeout)
         self.max_retries = max_retries
         self.session: Optional[aiohttp.ClientSession] = None
         self.usage_stats: Dict[str, ModelUsage] = {}
         self._model_configs: Dict[str, ModelConfig] = {}
+
+        # Daily budget accounting. 180 leaves headroom under the free 200/day cap.
+        self.daily_request_budget = daily_request_budget
+        self._requests_today = 0
+        self._budget_day = datetime.now(timezone.utc).date()
+        self._budget_exhausted_logged = False
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -108,8 +131,56 @@ class OpenRouterClient:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
+        await self.close()
+
+    async def close(self):
+        """Close the HTTP session. Safe to call more than once."""
+        if self.session and not self.session.closed:
             await self.session.close()
+        self.session = None
+
+    # ------------------------------------------------------------------ budget
+    def _roll_budget_day(self) -> None:
+        """Reset the request counter when the UTC day changes."""
+        today = datetime.now(timezone.utc).date()
+        if today != self._budget_day:
+            logger.info(
+                "OpenRouter daily budget reset (previous day used %d requests)",
+                self._requests_today,
+            )
+            self._budget_day = today
+            self._requests_today = 0
+            self._budget_exhausted_logged = False
+
+    def budget_status(self) -> Dict[str, Any]:
+        """Current budget consumption, for reporting to the operator."""
+        self._roll_budget_day()
+        return {
+            "requests_today": self._requests_today,
+            "daily_budget": self.daily_request_budget,
+            "remaining": max(0, self.daily_request_budget - self._requests_today),
+            "exhausted": self._requests_today >= self.daily_request_budget,
+        }
+
+    def _budget_exhausted_reason(self) -> Optional[str]:
+        """Return an explanation if no budget remains, else None."""
+        self._roll_budget_day()
+        if self._requests_today < self.daily_request_budget:
+            return None
+        if not self._budget_exhausted_logged:
+            logger.warning(
+                "OpenRouter daily request budget exhausted (%d/%d). AI features are "
+                "paused until 00:00 UTC. Trading is unaffected - the deterministic "
+                "strategy keeps running.",
+                self._requests_today,
+                self.daily_request_budget,
+            )
+            self._budget_exhausted_logged = True
+        return (
+            f"Daily AI request budget exhausted "
+            f"({self._requests_today}/{self.daily_request_budget}). "
+            f"Resets at 00:00 UTC."
+        )
 
     async def _ensure_session(self):
         """Ensure session exists."""
@@ -145,10 +216,22 @@ class OpenRouterClient:
     ) -> ChatCompletionResponse:
         """
         Send chat completion request with automatic fallback.
+
+        Raises ``AIBudgetExhausted`` when the daily request budget is spent, so
+        callers can degrade gracefully rather than hammering a rate limit.
         """
         await self._ensure_session()
 
+        exhausted = self._budget_exhausted_reason()
+        if exhausted:
+            raise AIBudgetExhausted(exhausted)
+
         model = model or self.default_model
+        if not model:
+            raise AIBudgetExhausted(
+                "No AI model is configured. Set 'model' in ai_orchestrator.yaml."
+            )
+
         models_to_try = [model]
         if use_fallback:
             models_to_try.extend([m for m in self.fallback_models if m != model])
@@ -174,12 +257,26 @@ class OpenRouterClient:
                     ) as response:
                         if response.status == 200:
                             data = await response.json()
+                            self._requests_today += 1
                             self._update_usage(attempt_model, data.get("usage", {}))
                             return ChatCompletionResponse(**data)
                         elif response.status == 429:
-                            # Rate limited - wait and retry
-                            wait_time = 2 ** retry
-                            logger.warning(f"Rate limited on {attempt_model}, waiting {wait_time}s")
+                            # Rate limited. Respect Retry-After when present, then
+                            # fall back to exponential backoff with jitter so two
+                            # plugins hitting the limit together do not sync up.
+                            retry_after = response.headers.get("Retry-After")
+                            try:
+                                wait_time = float(retry_after) if retry_after else 2 ** retry
+                            except ValueError:
+                                wait_time = 2 ** retry
+                            wait_time = min(wait_time, 60) + random.uniform(0, 1)
+                            logger.warning(
+                                "Rate limited on %s, waiting %.1fs (attempt %d/%d)",
+                                attempt_model,
+                                wait_time,
+                                retry + 1,
+                                self.max_retries,
+                            )
                             await asyncio.sleep(wait_time)
                             continue
                         elif response.status >= 500:

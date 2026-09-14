@@ -1,43 +1,120 @@
 """
-Freqtrade REST API Client for AI Orchestrator
+Freqtrade REST API Client for the AI Orchestrator
+=================================================
 
-Provides read/write access to Freqtrade via REST API.
+This client is written against the **real** Freqtrade REST API. Every endpoint
+below was verified against freqtrade/rpc/api_server/*.py.
+
+Why this file was rewritten
+---------------------------
+The previous version called a large number of endpoints that do not exist
+(`POST /api/v1/config`, `POST /api/v1/whitelist`, `GET /api/v1/candles`,
+`GET /api/v1/ticker`, `POST /api/v1/strategy`, `GET /api/v1/strategies`,
+`GET /api/v1/edge`, `GET /api/v1/plot`, ...). Those calls returned 404, which
+was swallowed by broad `except Exception` handlers, so the AI subsystem
+appeared to work while doing nothing at all.
+
+It also assumed every response was wrapped in a `{"data": ...}` envelope.
+Freqtrade returns its response models directly; only a few endpoints nest
+(`/trades` -> "trades", `/markets` -> "markets", `/daily` -> "data",
+`/logs` -> "logs", `/whitelist` -> "whitelist", `/blacklist` -> "blacklist").
+
+Design rules followed here
+--------------------------
+1. Only real endpoints. Anything Freqtrade cannot do at runtime raises
+   ``UnsupportedOperation`` with an explanation, rather than silently failing.
+2. Defensive parsing: schema drift must never raise ``KeyError``.
+3. Read-only by default. Mutating helpers are few, explicit and clearly named.
 """
 
-import asyncio
+from __future__ import annotations
+
 import logging
-from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
 import aiohttp
-from aiohttp import ClientTimeout, BasicAuth
-import json
+from aiohttp import BasicAuth, ClientTimeout
 
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# EXCEPTIONS
+# =============================================================================
+class FreqtradeAPIError(Exception):
+    """Any failure talking to the Freqtrade REST API."""
+
+
+class FreqtradeAuthError(FreqtradeAPIError):
+    """Authentication with the Freqtrade REST API failed."""
+
+
+class UnsupportedOperation(FreqtradeAPIError):
+    """
+    Raised when something is requested that the Freqtrade REST API genuinely
+    cannot do. This is deliberately loud: the previous implementation silently
+    swallowed these cases and pretended to succeed.
+    """
+
+
+# =============================================================================
+# DATA MODELS
+# =============================================================================
 @dataclass
 class Trade:
-    """Trade representation."""
+    """A single trade, open or closed."""
+
     trade_id: int
     pair: str
-    is_open: bool
-    open_rate: float
-    close_rate: Optional[float]
-    stake_amount: float
-    amount: float
-    open_date: datetime
-    close_date: Optional[datetime]
-    profit_ratio: Optional[float]
-    profit_abs: Optional[float]
-    exit_reason: Optional[str]
-    enter_tag: Optional[str]
-    strategy: str
+    is_open: bool = False
+    open_rate: float = 0.0
+    close_rate: Optional[float] = None
+    stake_amount: float = 0.0
+    amount: float = 0.0
+    open_date: Optional[datetime] = None
+    close_date: Optional[datetime] = None
+    profit_ratio: Optional[float] = None
+    profit_abs: Optional[float] = None
+    exit_reason: Optional[str] = None
+    enter_tag: Optional[str] = None
+    strategy: str = ""
+
+    @classmethod
+    def from_api(cls, t: Dict[str, Any]) -> "Trade":
+        return cls(
+            trade_id=int(t.get("trade_id", 0)),
+            pair=t.get("pair", ""),
+            is_open=bool(t.get("is_open", False)),
+            open_rate=float(t.get("open_rate") or 0.0),
+            close_rate=t.get("close_rate"),
+            stake_amount=float(t.get("stake_amount") or 0.0),
+            amount=float(t.get("amount") or 0.0),
+            open_date=_parse_dt(t.get("open_date")),
+            close_date=_parse_dt(t.get("close_date")),
+            profit_ratio=t.get("profit_ratio"),
+            profit_abs=t.get("profit_abs"),
+            exit_reason=t.get("exit_reason"),
+            enter_tag=t.get("enter_tag"),
+            strategy=t.get("strategy") or "",
+        )
+
+
+def _parse_dt(value: Any) -> Optional[datetime]:
+    """Parse an ISO timestamp from the API without ever raising."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
 
 
 @dataclass
 class PairCandle:
-    """Candle data for a pair."""
+    """One OHLCV candle for a pair."""
+
     pair: str
     timeframe: str
     open: float
@@ -49,41 +126,52 @@ class PairCandle:
 
 
 @dataclass
-class StrategyPerformance:
-    """Strategy performance metrics."""
-    strategy: str
-    total_trades: int
-    winning_trades: int
-    losing_trades: int
-    win_rate: float
-    avg_profit: float
-    total_profit: float
-    max_drawdown: float
-    sharpe_ratio: float
-    expectancy: float
+class BotStatus:
+    """
+    Bot status.
+
+    Freqtrade has no single "status" endpoint - the old client wrongly read
+    ``GET /api/v1/status`` (which actually returns the list of OPEN TRADES) and
+    tried to unpack it as a status object. This is composed from the endpoints
+    that really carry the data: ``/show_config``, ``/count``, ``/profit`` and
+    ``/balance``.
+    """
+
+    state: str = "unknown"
+    runmode: str = "unknown"
+    version: str = ""
+    exchange: str = ""
+    strategy: str = ""
+    timeframe: str = ""
+    stake_currency: str = ""
+    dry_run: bool = True
+    max_open_trades: int = 0
+    open_trades_count: int = 0
+    starting_balance: float = 0.0
+    current_balance: float = 0.0
+    profit_total: float = 0.0
+    profit_pct: float = 0.0
+
+    @property
+    def is_running(self) -> bool:
+        return self.state == "running"
 
 
 @dataclass
-class BotStatus:
-    """Bot status information."""
-    state: str  # running, stopped, starting, etc.
-    runtime: str
-    version: str
-    exchange: str
-    stake_currency: str
-    dry_run: bool
-    max_open_trades: int
-    open_trades_count: int
-    starting_balance: float
-    current_balance: float
-    profit_total: float
-    profit_pct: float
+class BacktestJob:
+    """Result of asking Freqtrade to run a backtest."""
+
+    status: str
+    job_id: Optional[str] = None
+    running: bool = False
+    raw: Dict[str, Any] = field(default_factory=dict)
 
 
+# =============================================================================
+# CLIENT
+# =============================================================================
 class FreqtradeAPIClient:
-    """
-    Async client for Freqtrade REST API.
-    """
+    """Async client for the Freqtrade REST API."""
 
     def __init__(
         self,
@@ -99,165 +187,251 @@ class FreqtradeAPIClient:
         self.session: Optional[aiohttp.ClientSession] = None
         self.auth = BasicAuth(username, password) if password else None
 
-    async def __aenter__(self):
+    # ------------------------------------------------------------------ session
+    async def __aenter__(self) -> "FreqtradeAPIClient":
         self.session = aiohttp.ClientSession(timeout=self.timeout)
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
 
-    async def _ensure_session(self):
+    async def close(self) -> None:
+        if self.session and not self.session.closed:
+            await self.session.close()
+        self.session = None
+
+    async def _ensure_session(self) -> None:
         if self.session is None or self.session.closed:
-            await self.__aenter__()
+            self.session = aiohttp.ClientSession(timeout=self.timeout)
 
     async def _request(
         self,
         method: str,
         endpoint: str,
-        params: Optional[Dict] = None,
-        json_data: Optional[Dict] = None,
+        params: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Make authenticated request to Freqtrade API."""
+        """Make an authenticated request to the Freqtrade API."""
         await self._ensure_session()
-
         url = f"{self.base_url}{endpoint}"
+
         try:
             async with self.session.request(
-                method,
-                url,
-                params=params,
-                json=json_data,
-                auth=self.auth,
+                method, url, params=params, json=json_data, auth=self.auth
             ) as response:
-                if response.status == 200:
-                    return await response.json()
-                elif response.status == 401:
-                    raise Exception("Authentication failed - check API credentials")
-                elif response.status == 404:
-                    raise Exception(f"Endpoint not found: {endpoint}")
-                else:
-                    error_text = await response.text()
-                    raise Exception(f"API error {response.status}: {error_text}")
-        except aiohttp.ClientError as e:
-            raise Exception(f"Connection error: {e}")
+                if response.status in (200, 201):
+                    # Some endpoints legitimately return an empty body.
+                    text = await response.text()
+                    if not text:
+                        return {}
+                    try:
+                        return await response.json()
+                    except Exception:
+                        return {"raw": text}
 
-    # ============================================================
-    # HEALTH & STATUS
-    # ============================================================
-    async def ping(self) -> Dict[str, str]:
-        """Health check endpoint."""
+                if response.status == 401:
+                    raise FreqtradeAuthError(
+                        "Freqtrade rejected the API credentials. Check that the "
+                        "'freqtrade_api_password' Swarm secret matches the "
+                        "api_server password in the generated private config."
+                    )
+                if response.status == 404:
+                    raise FreqtradeAPIError(
+                        f"Freqtrade returned 404 for {method} {endpoint}. "
+                        f"This endpoint does not exist in this Freqtrade version."
+                    )
+
+                detail = await response.text()
+                raise FreqtradeAPIError(
+                    f"Freqtrade API error {response.status} on {method} {endpoint}: {detail[:500]}"
+                )
+
+        except aiohttp.ClientError as e:
+            raise FreqtradeAPIError(f"Cannot reach Freqtrade at {url}: {e}") from e
+
+    # ============================================================ health & info
+    async def ping(self) -> Dict[str, Any]:
+        """Public health endpoint."""
         return await self._request("GET", "/api/v1/ping")
 
-    async def status(self) -> BotStatus:
-        """Get bot status."""
-        data = await self._request("GET", "/api/v1/status")
-        return BotStatus(**data.get("data", {}))
-
-    async def version(self) -> Dict[str, str]:
-        """Get version info."""
+    async def version(self) -> Dict[str, Any]:
         return await self._request("GET", "/api/v1/version")
 
-    # ============================================================
-    # TRADES
-    # ============================================================
+    async def get_config(self) -> Dict[str, Any]:
+        """Full effective bot configuration (GET /show_config)."""
+        return await self._request("GET", "/api/v1/show_config")
+
+    async def get_count(self) -> Dict[str, Any]:
+        """Open/max trade counts."""
+        return await self._request("GET", "/api/v1/count")
+
+    async def status(self) -> BotStatus:
+        """Compose the bot status from the endpoints that actually carry it."""
+        cfg = await self.get_config()
+
+        count: Dict[str, Any] = {}
+        profit: Dict[str, Any] = {}
+        balances: Dict[str, Any] = {}
+
+        # Each of these is optional: a partial status beats no status.
+        for label, coro, sink in (
+            ("count", self.get_count(), "count"),
+            ("profit", self._request("GET", "/api/v1/profit"), "profit"),
+            ("balance", self._request("GET", "/api/v1/balance"), "balance"),
+        ):
+            try:
+                value = await coro
+            except FreqtradeAPIError as e:
+                logger.warning("status(): %s unavailable: %s", label, e)
+                continue
+            if sink == "count":
+                count = value or {}
+            elif sink == "profit":
+                profit = value or {}
+            else:
+                balances = value or {}
+
+        try:
+            max_open = int(cfg.get("max_open_trades", 0))
+        except (TypeError, ValueError):
+            max_open = 0
+
+        return BotStatus(
+            state=str(cfg.get("state", "unknown")),
+            runmode=str(cfg.get("runmode", "unknown")),
+            version=str(cfg.get("version", "")),
+            exchange=str(cfg.get("exchange", "")),
+            strategy=str(cfg.get("strategy") or ""),
+            timeframe=str(cfg.get("timeframe") or ""),
+            stake_currency=str(cfg.get("stake_currency", "")),
+            dry_run=bool(cfg.get("dry_run", True)),
+            max_open_trades=max_open,
+            open_trades_count=int(count.get("current", 0) or 0),
+            starting_balance=float(balances.get("starting_capital", 0.0) or 0.0),
+            current_balance=float(balances.get("total", 0.0) or 0.0),
+            profit_total=float(profit.get("profit_all_coin", 0.0) or 0.0),
+            profit_pct=float(profit.get("profit_all_ratio", 0.0) or 0.0) * 100.0,
+        )
+
+    # ================================================================= trades
     async def get_trades(
         self,
         limit: int = 100,
         offset: int = 0,
         pair: Optional[str] = None,
-        is_open: Optional[bool] = None,
     ) -> List[Trade]:
-        """Get trade history."""
-        params = {"limit": limit, "offset": offset}
-        if pair:
-            params["pair"] = pair
-        if is_open is not None:
-            params["is_open"] = str(is_open).lower()
-
+        """Closed and open trade history (GET /trades -> {"trades": [...]})."""
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
         data = await self._request("GET", "/api/v1/trades", params=params)
-        trades = []
-        for t in data.get("data", []):
-            trades.append(Trade(
-                trade_id=t["trade_id"],
-                pair=t["pair"],
-                is_open=t["is_open"],
-                open_rate=t["open_rate"],
-                close_rate=t.get("close_rate"),
-                stake_amount=t["stake_amount"],
-                amount=t["amount"],
-                open_date=datetime.fromisoformat(t["open_date"].replace("Z", "+00:00")),
-                close_date=datetime.fromisoformat(t["close_date"].replace("Z", "+00:00")) if t.get("close_date") else None,
-                profit_ratio=t.get("profit_ratio"),
-                profit_abs=t.get("profit_abs"),
-                exit_reason=t.get("exit_reason"),
-                enter_tag=t.get("enter_tag"),
-                strategy=t.get("strategy", ""),
-            ))
-        return trades
+        trades = data.get("trades", data.get("data", [])) if isinstance(data, dict) else []
+        result = [Trade.from_api(t) for t in trades]
+        if pair:
+            result = [t for t in result if t.pair == pair]
+        return result
 
-    async def get_trade(self, trade_id: int) -> Trade:
-        """Get specific trade by ID."""
-        data = await self._request("GET", f"/api/v1/trade/{trade_id}")
-        t = data.get("data", {})
-        return Trade(
-            trade_id=t["trade_id"],
-            pair=t["pair"],
-            is_open=t["is_open"],
-            open_rate=t["open_rate"],
-            close_rate=t.get("close_rate"),
-            stake_amount=t["stake_amount"],
-            amount=t["amount"],
-            open_date=datetime.fromisoformat(t["open_date"].replace("Z", "+00:00")),
-            close_date=datetime.fromisoformat(t["close_date"].replace("Z", "+00:00")) if t.get("close_date") else None,
-            profit_ratio=t.get("profit_ratio"),
-            profit_abs=t.get("profit_abs"),
-            exit_reason=t.get("exit_reason"),
-            enter_tag=t.get("enter_tag"),
-            strategy=t.get("strategy", ""),
+    async def get_open_trades(self) -> List[Trade]:
+        """
+        Currently open trades (GET /status returns open trades directly).
+
+        Note this is the endpoint the old client mistakenly treated as
+        bot status.
+        """
+        data = await self._request("GET", "/api/v1/status")
+        if not isinstance(data, list):
+            return []
+        return [Trade.from_api(t) for t in data]
+
+    async def get_closed_trades(self, limit: int = 50) -> List[Trade]:
+        trades = await self.get_trades(limit=limit)
+        return [t for t in trades if not t.is_open]
+
+    async def get_trade(self, trade_id: int) -> Optional[Trade]:
+        try:
+            data = await self._request("GET", f"/api/v1/trade/{trade_id}")
+        except FreqtradeAPIError:
+            return None
+        return Trade.from_api(data) if isinstance(data, dict) else None
+
+    async def force_exit(self, trade_id: int, ordertype: str = "market") -> Dict[str, Any]:
+        """
+        Force-close a trade (POST /forceexit).
+
+        The old client posted to /trade/{id}/exit, which does not exist.
+        """
+        return await self._request(
+            "POST", "/api/v1/forceexit", json_data={"tradeid": str(trade_id), "ordertype": ordertype}
         )
 
-    async def force_exit(self, trade_id: int) -> Dict[str, Any]:
-        """Force exit a trade."""
-        return await self._request("POST", f"/api/v1/trade/{trade_id}/exit")
+    async def cancel_open_order(self, trade_id: int) -> Dict[str, Any]:
+        return await self._request("DELETE", f"/api/v1/trades/{trade_id}/open-order")
 
-    async def delete_trade(self, trade_id: int) -> Dict[str, Any]:
-        """Delete a trade (dry-run only)."""
-        return await self._request("DELETE", f"/api/v1/trade/{trade_id}")
+    # ================================================================ markets
+    async def get_markets(self) -> Dict[str, Any]:
+        """All markets known to the exchange (GET /markets -> {"markets": {...}})."""
+        data = await self._request("GET", "/api/v1/markets")
+        return data.get("markets", {}) if isinstance(data, dict) else {}
 
-    # ============================================================
-    # PAIRS & MARKET DATA
-    # ============================================================
-    async def get_pairs(self) -> List[Dict[str, Any]]:
-        """Get available pairs from exchange."""
-        data = await self._request("GET", "/api/v1/pairs")
-        return data.get("data", [])
+    async def get_pairs(self) -> List[str]:
+        """
+        Pair names.
+
+        The old client read GET /api/v1/pairs, which does not exist.
+        """
+        return sorted(await self.get_markets())
 
     async def get_whitelist(self) -> List[str]:
-        """Get current whitelist."""
+        """Current whitelist (GET /whitelist -> {"whitelist": [...]})."""
         data = await self._request("GET", "/api/v1/whitelist")
-        return data.get("data", [])
-
-    async def set_whitelist(self, pairs: List[str]) -> Dict[str, Any]:
-        """Set whitelist (requires reload)."""
-        return await self._request("POST", "/api/v1/whitelist", json_data={"pairs": pairs})
-
-    async def add_to_whitelist(self, pairs: List[str]) -> Dict[str, Any]:
-        """Add pairs to whitelist."""
-        return await self._request("POST", "/api/v1/whitelist/add", json_data={"pairs": pairs})
-
-    async def remove_from_whitelist(self, pairs: List[str]) -> Dict[str, Any]:
-        """Remove pairs from whitelist."""
-        return await self._request("POST", "/api/v1/whitelist/remove", json_data={"pairs": pairs})
+        return list(data.get("whitelist", [])) if isinstance(data, dict) else []
 
     async def get_blacklist(self) -> List[str]:
-        """Get current blacklist."""
+        """Current runtime blacklist (GET /blacklist -> {"blacklist": [...]})."""
         data = await self._request("GET", "/api/v1/blacklist")
-        return data.get("data", [])
+        return list(data.get("blacklist", [])) if isinstance(data, dict) else []
 
-    async def set_blacklist(self, pairs: List[str]) -> Dict[str, Any]:
-        """Set blacklist."""
-        return await self._request("POST", "/api/v1/blacklist", json_data={"pairs": pairs})
+    async def add_to_blacklist(self, pairs: List[str]) -> Dict[str, Any]:
+        """Add pairs to the RUNTIME blacklist (POST /blacklist)."""
+        return await self._request("POST", "/api/v1/blacklist", json_data={"blacklist": pairs})
+
+    async def remove_from_blacklist(self, pairs: List[str]) -> Dict[str, Any]:
+        """Remove pairs from the runtime blacklist (DELETE /blacklist)."""
+        return await self._request("DELETE", "/api/v1/blacklist", json_data={"blacklist": pairs})
+
+    async def set_whitelist(self, pairs: List[str]) -> Dict[str, Any]:
+        """
+        Restrict trading to exactly ``pairs``.
+
+        The Freqtrade REST API has **no** whitelist mutation endpoint - the
+        whitelist is produced by the configured pairlist handler. The only
+        supported runtime equivalent is to blacklist the complement.
+
+        This is intentionally explicit about that, because the effect differs
+        from "set the whitelist": the change is runtime-only and disappears when
+        the bot restarts, and the blacklist is what actually gates trading.
+        """
+        available = await self.get_pairs()
+        wanted = set(pairs)
+        if not wanted:
+            raise UnsupportedOperation(
+                "Refusing to restrict trading to an empty pair list - that would "
+                "blacklist every market. Pass at least one pair."
+            )
+
+        unknown = sorted(wanted - set(available))
+        if unknown:
+            raise UnsupportedOperation(
+                f"These pairs are not available on the exchange: {', '.join(unknown)}"
+            )
+
+        complement = sorted(set(available) - wanted)
+        result = await self.add_to_blacklist(complement)
+        return {
+            "mode": "blacklist_complement",
+            "trading_restricted_to": sorted(wanted),
+            "pairs_blacklisted": len(complement),
+            "runtime_only": True,
+            "raw": result,
+        }
 
     async def get_candles(
         self,
@@ -265,180 +439,268 @@ class FreqtradeAPIClient:
         timeframe: str = "5m",
         limit: int = 100,
     ) -> List[PairCandle]:
-        """Get candle data for a pair."""
-        params = {"pair": pair, "timeframe": timeframe, "limit": limit}
-        data = await self._request("GET", "/api/v1/candles", params=params)
-        candles = []
-        for c in data.get("data", []):
-            candles.append(PairCandle(
-                pair=c["pair"],
-                timeframe=c["timeframe"],
-                open=c["open"],
-                high=c["high"],
-                low=c["low"],
-                close=c["close"],
-                volume=c["volume"],
-                date=datetime.fromisoformat(c["date"].replace("Z", "+00:00")),
-            ))
+        """
+        Analysed candles for a pair (GET /pair_candles).
+
+        The response is column-oriented: ``{"columns": [...], "data": [[...]]}``.
+        The old client read GET /api/v1/candles, which does not exist, so this
+        always returned nothing.
+        """
+        data = await self._request(
+            "GET",
+            "/api/v1/pair_candles",
+            params={"pair": pair, "timeframe": timeframe, "limit": limit},
+        )
+        if not isinstance(data, dict):
+            return []
+
+        columns = data.get("columns") or []
+        rows = data.get("data") or []
+        if not columns or not rows:
+            return []
+
+        idx = {name: i for i, name in enumerate(columns)}
+        required = ("date", "open", "high", "low", "close", "volume")
+        if any(k not in idx for k in required):
+            logger.warning(
+                "pair_candles for %s is missing expected columns (got %s)", pair, columns
+            )
+            return []
+
+        candles: List[PairCandle] = []
+        for row in rows:
+            try:
+                candles.append(
+                    PairCandle(
+                        pair=data.get("pair", pair),
+                        timeframe=data.get("timeframe", timeframe),
+                        open=float(row[idx["open"]]),
+                        high=float(row[idx["high"]]),
+                        low=float(row[idx["low"]]),
+                        close=float(row[idx["close"]]),
+                        volume=float(row[idx["volume"]]),
+                        date=datetime.fromtimestamp(
+                            float(row[idx["date"]]) / 1000.0, tz=timezone.utc
+                        ),
+                    )
+                )
+            except (TypeError, ValueError, IndexError) as e:
+                logger.debug("Skipping malformed candle row for %s: %s", pair, e)
         return candles
 
-    async def get_ticker(self, pair: Optional[str] = None) -> Dict[str, Any]:
-        """Get ticker data."""
-        params = {}
-        if pair:
-            params["pair"] = pair
-        data = await self._request("GET", "/api/v1/ticker", params=params)
-        return data.get("data", {})
+    # ========================================================= strategy & stats
+    async def get_ticker_snapshot(self, pair: str) -> Dict[str, Any]:
+        """
+        A price snapshot **derived from candles**.
 
-    # ============================================================
-    # CONFIGURATION
-    # ============================================================
-    async def get_config(self) -> Dict[str, Any]:
-        """Get current configuration."""
-        data = await self._request("GET", "/api/v1/config")
-        return data.get("data", {})
+        Freqtrade has no ticker/orderbook endpoint, so the old ``get_ticker``
+        call always 404'd. The last price, 24h change and 24h volume are derived
+        from real candles; bid/ask are genuinely unavailable and are returned as
+        ``None`` rather than invented.
 
-    async def update_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Update configuration (requires reload)."""
-        return await self._request("POST", "/api/v1/config", json_data=config)
+        The ``source`` field records that this is derived, so nothing downstream
+        can mistake it for exchange-native ticker data.
+        """
+        hourly = await self.get_candles(pair, "1h", 25)
+        if not hourly:
+            # Fall back to 5m candles if hourly data is not available.
+            hourly = await self.get_candles(pair, "5m", 288)
 
-    async def reload_config(self) -> Dict[str, Any]:
-        """Reload configuration."""
-        return await self._request("POST", "/api/v1/reload_config")
+        if not hourly:
+            return {
+                "pair": pair,
+                "last": None,
+                "change_24h_pct": None,
+                "volume_24h": None,
+                "bid": None,
+                "ask": None,
+                "source": "unavailable",
+            }
 
-    # ============================================================
-    # STRATEGY
-    # ============================================================
-    async def get_strategy(self) -> Dict[str, Any]:
-        """Get current strategy info."""
-        data = await self._request("GET", "/api/v1/strategy")
-        return data.get("data", {})
+        last = hourly[-1].close
+        window = hourly[-24:] if len(hourly) >= 24 else hourly
+        first = window[0].open or window[0].close
+        change_pct = ((last - first) / first * 100.0) if first else None
+        volume = sum(c.volume for c in window)
 
-    async def list_strategies(self) -> List[str]:
-        """List available strategies."""
-        data = await self._request("GET", "/api/v1/strategies")
-        return data.get("data", [])
+        return {
+            "pair": pair,
+            "last": last,
+            "change_24h_pct": change_pct,
+            "volume_24h": volume,
+            "bid": None,
+            "ask": None,
+            "source": "derived_from_candles",
+        }
 
-    async def set_strategy(self, strategy: str) -> Dict[str, Any]:
-        """Change strategy (requires reload)."""
-        return await self._request("POST", "/api/v1/strategy", json_data={"strategy": strategy})
+    async def get_strategy(self, strategy: str) -> Dict[str, Any]:
+        """Info for a named strategy (GET /strategy/{strategy})."""
+        return await self._request("GET", f"/api/v1/strategy/{strategy}")
 
-    # ============================================================
-    # PROFIT & PERFORMANCE
-    # ============================================================
     async def get_profit(self) -> Dict[str, Any]:
-        """Get profit statistics."""
-        data = await self._request("GET", "/api/v1/profit")
-        return data.get("data", {})
+        return await self._request("GET", "/api/v1/profit")
 
-    async def get_performance(self) -> List[StrategyPerformance]:
-        """Get strategy performance."""
+    async def get_performance(self) -> List[Dict[str, Any]]:
+        """Per-pair performance (GET /performance -> list of {pair, profit})."""
         data = await self._request("GET", "/api/v1/performance")
-        performances = []
-        for p in data.get("data", []):
-            performances.append(StrategyPerformance(**p))
-        return performances
+        return list(data) if isinstance(data, list) else []
+
+    async def get_stats(self) -> Dict[str, Any]:
+        return await self._request("GET", "/api/v1/stats")
 
     async def get_daily_profit(self, days: int = 30) -> List[Dict[str, Any]]:
-        """Get daily profit history."""
-        params = {"days": days}
-        data = await self._request("GET", "/api/v1/daily_profit", params=params)
-        return data.get("data", [])
+        """Daily profit records (GET /daily?timescale=N)."""
+        data = await self._request("GET", "/api/v1/daily", params={"timescale": days})
+        return list(data.get("data", [])) if isinstance(data, dict) else []
 
-    # ============================================================
-    # BALANCE
-    # ============================================================
     async def get_balance(self) -> Dict[str, Any]:
-        """Get account balance."""
-        data = await self._request("GET", "/api/v1/balance")
-        return data.get("data", {})
+        """Account balances (GET /balance)."""
+        return await self._request("GET", "/api/v1/balance")
 
-    # ============================================================
-    # BOT CONTROL
-    # ============================================================
+    async def get_logs(self, limit: int = 100) -> List[Any]:
+        """Recent log lines (GET /logs -> {"logs": [...]})."""
+        data = await self._request("GET", "/api/v1/logs", params={"limit": limit})
+        return list(data.get("logs", [])) if isinstance(data, dict) else []
+
+    # ============================================================ bot control
     async def start(self) -> Dict[str, Any]:
-        """Start the bot."""
         return await self._request("POST", "/api/v1/start")
 
     async def stop(self) -> Dict[str, Any]:
-        """Stop the bot."""
         return await self._request("POST", "/api/v1/stop")
 
-    async def restart(self) -> Dict[str, Any]:
-        """Restart the bot."""
-        return await self._request("POST", "/api/v1/restart")
-
     async def pause(self) -> Dict[str, Any]:
-        """Pause trading (keep bot running)."""
+        """Stop entering new trades but keep managing open ones."""
         return await self._request("POST", "/api/v1/pause")
 
-    async def resume(self) -> Dict[str, Any]:
-        """Resume trading."""
-        return await self._request("POST", "/api/v1/resume")
+    async def reload_config(self) -> Dict[str, Any]:
+        """Re-read the config from disk (POST /reload_config)."""
+        return await self._request("POST", "/api/v1/reload_config")
 
-    # ============================================================
-    # LOGS
-    # ============================================================
-    async def get_logs(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get recent logs."""
-        params = {"limit": limit}
-        data = await self._request("GET", "/api/v1/logs", params=params)
-        return data.get("data", [])
+    async def update_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        There is no runtime config-write endpoint in the Freqtrade REST API.
 
-    # ============================================================
-    # EDGE
-    # ============================================================
-    async def get_edge_info(self) -> Dict[str, Any]:
-        """Get Edge (position sizing) info."""
-        data = await self._request("GET", "/api/v1/edge")
-        return data.get("data", {})
+        The old client POSTed to /api/v1/config, which 404s. Raising here means
+        callers cannot silently believe a change was applied.
+        """
+        raise UnsupportedOperation(
+            "Freqtrade cannot change its configuration at runtime over the REST API. "
+            "Settings such as stoploss, minimal_roi and max_open_trades are read at "
+            "startup. To change them, update the 'freqtrade_canada_config' Swarm "
+            "config in Portainer and redeploy the stack."
+        )
 
-    # ============================================================
-    # PLOTTING
-    # ============================================================
-    async def get_plot_config(self) -> Dict[str, Any]:
-        """Get plot configuration."""
-        data = await self._request("GET", "/api/v1/plot_config")
-        return data.get("data", {})
-
-    async def get_plot_data(
+    # ================================================== data download & backtest
+    async def download_data(
         self,
-        pair: str,
-        timeframe: str = "5m",
-        limit: int = 100,
+        pairs: List[str],
+        timeframes: Optional[List[str]] = None,
+        days: Optional[int] = None,
+        timerange: Optional[str] = None,
+        download_trades: bool = False,
     ) -> Dict[str, Any]:
-        """Get plot data for a pair."""
-        params = {"pair": pair, "timeframe": timeframe, "limit": limit}
-        data = await self._request("GET", "/api/v1/plot", params=params)
-        return data.get("data", {})
+        """
+        Start a historical data download (POST /download_data).
 
-    # ============================================================
-    # HELPER METHODS
-    # ============================================================
-    async def get_open_trades(self) -> List[Trade]:
-        """Get all open trades."""
-        return await self.get_trades(is_open=True)
+        Required before backtesting: Freqtrade cannot backtest without local
+        candle data, and Kraken only serves ~720 candles per REST request.
+        """
+        payload: Dict[str, Any] = {
+            "pairs": pairs,
+            "timeframes": timeframes or ["5m"],
+            "download_trades": download_trades,
+        }
+        # days and timerange are mutually exclusive in the API.
+        if timerange:
+            payload["timerange"] = timerange
+        else:
+            payload["days"] = days if days is not None else 30
+        return await self._request("POST", "/api/v1/download_data", json_data=payload)
 
-    async def get_closed_trades(self, limit: int = 50) -> List[Trade]:
-        """Get recent closed trades."""
-        return await self.get_trades(is_open=False, limit=limit)
+    async def start_backtest(
+        self,
+        strategy: str,
+        timeframe: Optional[str] = None,
+        timerange: Optional[str] = None,
+        enable_protections: bool = True,
+        dry_run_wallet: Optional[float] = None,
+    ) -> BacktestJob:
+        """Start a backtest (POST /backtest)."""
+        payload: Dict[str, Any] = {
+            "strategy": strategy,
+            "enable_protections": enable_protections,
+        }
+        if timeframe:
+            payload["timeframe"] = timeframe
+        if timerange:
+            payload["timerange"] = timerange
+        if dry_run_wallet is not None:
+            payload["dry_run_wallet"] = dry_run_wallet
 
+        data = await self._request("POST", "/api/v1/backtest", json_data=payload)
+        data = data if isinstance(data, dict) else {}
+        return BacktestJob(
+            status=str(data.get("status", "unknown")),
+            job_id=data.get("job_id"),
+            running=str(data.get("status", "")).lower() == "running",
+            raw=data,
+        )
+
+    async def get_backtest_status(self) -> BacktestJob:
+        """Poll a running backtest (GET /backtest)."""
+        data = await self._request("GET", "/api/v1/backtest")
+        data = data if isinstance(data, dict) else {}
+        return BacktestJob(
+            status=str(data.get("status", "unknown")),
+            job_id=data.get("job_id"),
+            running=str(data.get("status", "")).lower() == "running",
+            raw=data,
+        )
+
+    async def abort_backtest(self) -> Dict[str, Any]:
+        return await self._request("GET", "/api/v1/backtest/abort")
+
+    async def get_backtest_history(self) -> List[Dict[str, Any]]:
+        data = await self._request("GET", "/api/v1/backtest/history")
+        if isinstance(data, list):
+            return data
+        return list(data.get("history", [])) if isinstance(data, dict) else []
+
+    async def get_backtest_result(self, filename: str, strategy: str) -> Dict[str, Any]:
+        """Fetch a stored backtest result."""
+        return await self._request(
+            "GET",
+            "/api/v1/backtest/history/result",
+            params={"filename": filename, "strategy": strategy},
+        )
+
+    # ============================================================== conveniences
     async def get_total_profit(self) -> float:
-        """Get total profit."""
         profit = await self.get_profit()
-        return profit.get("profit_total", 0.0)
+        return float(profit.get("profit_all_coin", 0.0) or 0.0)
 
     async def get_win_rate(self) -> float:
-        """Get win rate from performance."""
-        perf = await self.get_performance()
-        if perf:
-            return perf[0].win_rate
-        return 0.0
+        """
+        Win rate as a ratio (0.0-1.0), derived from profit statistics.
+
+        The old client read ``performance[0].win_rate``, but /performance only
+        returns {pair, profit} entries.
+        """
+        profit = await self.get_profit()
+        closed = profit.get("closed_trade_count")
+        try:
+            closed = int(closed)
+            winners = int(profit.get("winning_trades", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return (winners / closed) if closed else 0.0
 
     async def health_check(self) -> bool:
-        """Simple health check."""
         try:
             result = await self.ping()
-            return result.get("status") == "pong"
-        except Exception:
+        except FreqtradeAPIError:
             return False
+        if isinstance(result, dict):
+            return str(result.get("status", "")).lower() == "pong"
+        return False

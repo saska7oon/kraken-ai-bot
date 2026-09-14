@@ -163,10 +163,10 @@ class AutonomousAgentPlugin(BasePlugin):
         analysis = {}
         for pair in self.allowed_pairs or await self.freqtrade.get_whitelist():
             try:
-                ticker = await self.freqtrade.get_ticker(pair)
+                ticker = await self.freqtrade.get_ticker_snapshot(pair)
                 candles = await self.freqtrade.get_candles(pair, "1h", 100)
                 analysis[pair] = {
-                    "ticker": ticker.get(pair, {}) if ticker else {},
+                    "ticker": ticker,
                     "trend": self._simple_trend(candles) if candles else "unknown",
                 }
             except Exception:

@@ -47,9 +47,15 @@ class MarketAnalystPlugin(BasePlugin):
         self.audit = orchestrator.audit_logger
 
         # Config
-        self.sources = config.config.get("sources", ["technical", "fear_greed"])
+        self.sources = config.config.get("sources", ["technical"])
         self.pairs_to_analyze = config.config.get("pairs", [])  # Empty = all whitelist
         self.regime_threshold = config.config.get("regime_threshold", 0.6)
+
+        # AI "sentiment" analysis is off by default. The model has no market data
+        # beyond what the deterministic indicators already computed, and asking it
+        # to re-derive them cost ~96 requests/day for no additional signal.
+        # The explainer plugin narrates these same facts on demand instead.
+        self.ai_sentiment = config.config.get("ai_sentiment", False)
 
     async def initialize(self) -> bool:
         """Initialize plugin."""
@@ -88,8 +94,8 @@ class MarketAnalystPlugin(BasePlugin):
         regime = await self._determine_regime(results["pair_analysis"])
         results["regime"] = asdict(regime)
 
-        # Get sentiment from LLM
-        if "news" in self.sources or "fear_greed" in self.sources:
+        # Optional AI sentiment pass. Off by default - see __init__.
+        if self.ai_sentiment and ("news" in self.sources or "fear_greed" in self.sources):
             sentiment = await self._get_sentiment_analysis(results)
             results["sentiment"] = [asdict(s) for s in sentiment]
 
@@ -116,18 +122,15 @@ class MarketAnalystPlugin(BasePlugin):
         candles_1h = await self.freqtrade.get_candles(pair, "1h", 200)
         candles_4h = await self.freqtrade.get_candles(pair, "4h", 100)
         candles_1d = await self.freqtrade.get_candles(pair, "1d", 100)
-        ticker = await self.freqtrade.get_ticker(pair)
-
-        ticker_data = ticker.get(pair, {}) if ticker else {}
+        # Derived from candles: Freqtrade exposes no ticker endpoint.
+        ticker = await self.freqtrade.get_ticker_snapshot(pair)
 
         return {
             "pair": pair,
-            "price": ticker_data.get("last", 0),
-            "change_24h": ticker_data.get("percentage", 0),
-            "volume_24h": ticker_data.get("baseVolume", 0),
-            "bid": ticker_data.get("bid", 0),
-            "ask": ticker_data.get("ask", 0),
-            "spread_pct": ((ticker_data.get("ask", 0) - ticker_data.get("bid", 0)) / ticker_data.get("bid", 1)) * 100 if ticker_data.get("bid") else 0,
+            "price": ticker.get("last"),
+            "change_24h": ticker.get("change_24h_pct"),
+            "volume_24h": ticker.get("volume_24h"),
+            "price_source": ticker.get("source"),
             "timeframes": {
                 "5m": self._analyze_timeframe(candles_5m, "5m"),
                 "1h": self._analyze_timeframe(candles_1h, "1h"),

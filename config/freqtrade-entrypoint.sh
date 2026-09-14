@@ -142,7 +142,36 @@ sudo -n /bin/chown -R "${CURRENT_UID}:${CURRENT_GID}" /freqtrade/user_data 2>/de
     || true
 
 # ---------------------------------------------------------------------------
-# 5. Hand over to freqtrade (command from the stack becomes "$@")
+# 5. Stage strategies into the shared strategies volume.
+#
+#    The shared volume 'strategies_shared' is mounted here as
+#    /freqtrade/user_data/strategies and into the AI orchestrator as
+#    /app/strategies. Two consequences:
+#
+#      * AI-proposed strategies appear where freqtrade can backtest them, which
+#        is what lets a proposal be tested before anyone is asked to approve it.
+#      * The operator's strategy lives in a read-only Swarm config, so it is
+#        copied in fresh on every start. cp -f overwrites the staged copy but
+#        leaves AI proposals (proposal_*.py) alone.
+# ---------------------------------------------------------------------------
+STRATEGY_DIR="/freqtrade/user_data/strategies"
+mkdir -p "${STRATEGY_DIR}"
+
+if [ -d /etc/freqtrade-strategies ]; then
+    for strategy in /etc/freqtrade-strategies/*.py; do
+        [ -e "${strategy}" ] || continue
+        cp -f "${strategy}" "${STRATEGY_DIR}/" \
+            && log "staged strategy: $(basename "${strategy}")" \
+            || error "failed to stage strategy $(basename "${strategy}")"
+    done
+fi
+
+# The orchestrator writes proposals into the same volume as uid 1000, so the
+# directory must be writable by the freqtrade user.
+chmod 0775 "${STRATEGY_DIR}" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 6. Hand over to freqtrade (command from the stack becomes "$@")
 # ---------------------------------------------------------------------------
 log "starting: freqtrade $*"
 exec freqtrade "$@"

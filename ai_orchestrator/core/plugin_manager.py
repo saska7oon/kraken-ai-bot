@@ -123,6 +123,7 @@ class PluginManager:
             "param_optimizer": "ai_orchestrator.plugins.param_optimizer.ParamOptimizerPlugin",
             "nl_config": "ai_orchestrator.plugins.nl_config.NLConfigPlugin",
             "autonomous_agent": "ai_orchestrator.plugins.autonomous_agent.AutonomousAgentPlugin",
+            "explainer": "ai_orchestrator.plugins.explainer.ExplainerPlugin",
         }
 
     async def initialize(self) -> bool:

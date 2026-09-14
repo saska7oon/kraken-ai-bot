@@ -1,60 +1,122 @@
+# =============================================================================
 # AI Orchestrator Configuration
-# This file is mounted at /app/config/ai_orchestrator.yaml
+# =============================================================================
+# Mounted at /app/config/ai_orchestrator.yaml via the 'freqtrade_ai_config'
+# Swarm config. Contains NO secrets.
+#
+# Design principle: the AI explains and suggests. It does not decide trades and
+# it cannot change the bot's configuration. Signals come from deterministic,
+# backtestable rules in the strategy; the AI narrates them in plain language.
+#
+# Budget: the default OpenRouter model is on the free tier (200 requests/day).
+# The scheduler is tuned to stay well inside that. When the budget runs out the
+# plugins degrade to deterministic output; trading is never affected.
+# =============================================================================
 
 model: "nvidia/nemotron-3-ultra-550b-a55b:free"
-fallback_models:
-  - "deepseek/deepseek-chat"
-  - "google/gemini-flash-1.5"
-  - "anthropic/claude-3.5-haiku"
+
+# Fallbacks are deliberately EMPTY. Listing paid models here would silently
+# spend the operator's credits if the free model is unavailable. Add models
+# explicitly if you want fallback behaviour.
+fallback_models: []
 
 plugins:
+
+  # ---------------------------------------------------------------------------
+  # EXPLAINER - the primary AI role.
+  # One digest per day. Explains the bot's behaviour to a non-expert operator.
+  # Never predicts prices and never gives trading advice.
+  # ---------------------------------------------------------------------------
+  explainer:
+    enabled: true
+    schedule: "0 8 * * *"        # daily at 08:00 (server timezone: America/Toronto)
+    config:
+      send_digest_to_discord: true
+      include_technical_detail: false
+    priority: 5
+
+  # ---------------------------------------------------------------------------
+  # STRATEGY GENERATOR - weekly. Proposals only, and only after the static
+  # safety validator and a real backtest both pass.
+  # ~1 AI request per week.
+  # ---------------------------------------------------------------------------
   strategy_generator:
     enabled: true
-    schedule: "0 2 * * 0"  # Weekly Sunday 2 AM
+    schedule: "0 2 * * 0"        # Sundays at 02:00
     config:
       max_strategies: 3
       risk_profile: "moderate"
-      min_backtest_sharpe: 1.0
+      # A proposal must clear these before it is shown to the operator at all.
+      require_backtest: true
       min_backtest_trades: 50
-      model: "nvidia/nemotron-3-ultra-550b-a55b:free"
+      min_backtest_profit_pct: 0.0
+      max_backtest_drawdown_pct: 25.0
+      min_backtest_sharpe: 1.0
+      backtest_timerange_days: 180
     priority: 10
 
+  # ---------------------------------------------------------------------------
+  # MARKET ANALYST - deterministic indicator analysis, hourly.
+  # The indicator maths (EMA/RSI/MACD/Bollinger/ADX/ATR) is computed in Python.
+  # It previously ran every 15 minutes and asked an LLM to re-derive what Python
+  # had already calculated: ~96 AI requests/day for no extra signal. Now it
+  # computes facts cheaply and the explainer narrates them on demand.
+  # ---------------------------------------------------------------------------
   market_analyst:
     enabled: true
-    schedule: "*/15 * * * *"  # Every 15 minutes
+    schedule: "0 * * * *"        # hourly
     config:
-      sources: ["technical", "fear_greed", "news"]
-      pairs: []  # Empty = all whitelist
+      pairs: []                  # empty = use the whitelist
       regime_threshold: 0.6
+      # No AI sentiment call: the model has no market data the indicators lack.
+      ai_sentiment: false
     priority: 20
 
+  # ---------------------------------------------------------------------------
+  # PARAMETER OPTIMIZER - every 6 hours, proposals only.
+  # Note: Freqtrade cannot change parameters at runtime. Suggestions are
+  # returned as values the operator applies via the Swarm config.
+  # ---------------------------------------------------------------------------
   param_optimizer:
     enabled: true
-    schedule: "0 */6 * * *"  # Every 6 hours
+    schedule: "0 */6 * * *"
     config:
       trigger: "performance_drop"
-      performance_threshold: 1.0  # Sharpe ratio
+      performance_threshold: 1.0
       min_trades_for_analysis: 30
       max_suggestions: 5
-      auto_apply: false  # Requires approval
+      # There is no auto-apply path. This key exists only to be explicit.
+      auto_apply: false
     priority: 30
 
+  # ---------------------------------------------------------------------------
+  # NATURAL LANGUAGE CONFIG - event driven, no schedule.
+  # Runtime actions (pause/resume/restrict pairs/status) execute for real.
+  # Configuration changes are proposals; dry_run can never be changed here.
+  # ---------------------------------------------------------------------------
   nl_config:
     enabled: true
-    # No schedule - event driven
     config:
       auto_apply_safe: false
       require_approval_for:
         - "risk_change"
-        - "whitelist_change"
         - "strategy_change"
         - "stoploss_change"
         - "position_size_change"
         - "bot_control"
-    priority: 100  # Highest - handles user commands
+        - "restrict_pairs"
+    priority: 100                # highest: handles operator commands
 
+  # ---------------------------------------------------------------------------
+  # AUTONOMOUS AGENT - DISABLED. Leave it that way.
+  #
+  # It is the only component that can place trades without asking. It refuses to
+  # initialise unless explicitly_enabled is true, and it is deliberately not
+  # reachable through the API: flipping this flag requires editing this Swarm
+  # config and redeploying, which is exactly the friction we want.
+  # ---------------------------------------------------------------------------
   autonomous_agent:
-    enabled: false  # DANGEROUS - requires explicit opt-in
+    enabled: false
     config:
       explicitly_enabled: false
       require_confirmation: true
@@ -64,8 +126,13 @@ plugins:
       max_drawdown_pct: 0.10
     priority: 50
 
+# =============================================================================
+# SAFETY
+# =============================================================================
 safety:
-  max_daily_trades: 50
-  max_drawdown_pct: 0.15
   require_human_approval: true
   audit_log_retention_days: 365
+  # Hard ceiling on AI spend, independent of the provider's own limits.
+  max_daily_ai_requests: 180
+  # Refuse to start if the daily budget is exceeded.
+  halt_on_budget_exceeded: false

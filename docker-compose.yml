@@ -1,3 +1,28 @@
+# =============================================================================
+# DO NOT USE THIS FILE - SUPERSEDED AND KNOWN BROKEN
+# =============================================================================
+# This is the original docker-compose (single-host, non-Swarm) deployment. It
+# has been superseded by portainer-stack.yml, which is what this project
+# actually deploys.
+#
+# Two reasons not to use it:
+#
+#   1. IT DOES NOT LOAD YOUR KRAKEN CREDENTIALS. Every service here passes
+#      credentials with the "*_FILE" convention, e.g.
+#          FREQTRADE__EXCHANGE__API_KEY_FILE=/run/secrets/kraken_api_key
+#      Freqtrade does NOT support that convention. It only reads literal values
+#      from FREQTRADE__SECTION__KEY, so these variables are silently ignored and
+#      the API key is never loaded - the bot appears to run but cannot trade.
+#      The working approach (an entrypoint that reads the secret files and
+#      writes an ephemeral private config to tmpfs) is in
+#      config/freqtrade-entrypoint.sh and portainer-stack.yml.
+#
+#   2. IT BYPASSES THE SECURITY MODEL. It publishes the AI orchestrator port and
+#      uses host bind mounts for config, rather than read-only Swarm configs.
+#
+# Kept only for historical reference. Use portainer-stack.yml.
+# =============================================================================
+
 version: '3.8'
 
 services:

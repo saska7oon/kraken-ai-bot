@@ -97,6 +97,39 @@ dataformat_ohlcv: "json"
 dataformat_trades: "jsongz"
 
 # -----------------------------------------------------------------------------
+# PROTECTIONS - automatic circuit breakers
+# -----------------------------------------------------------------------------
+# These are Freqtrade's built-in safety mechanisms. They are deterministic,
+# backtested upstream, and active in dry-run as well as live.
+#
+# The previous configuration had NONE of these, which meant that if the strategy
+# started bleeding, nothing would have stopped it. For an operator who is not a
+# trader, these are the single most valuable settings in the file.
+#
+# Timings are expressed in candles. The timeframe is 5m, so:
+#   12 candles = 1 hour, 96 = 8 hours, 288 = 24 hours.
+protections:
+  # Stop trading entirely if the account loses more than 10% within a day.
+  - method: "MaxDrawdown"
+    lookback_period_candles: 288      # look at the last 24 hours
+    trade_limit: 10                   # only act once at least 10 trades exist
+    stop_duration_candles: 288        # then pause for 24 hours
+    max_allowed_drawdown: 0.10        # 10%
+
+  # If 3 trades hit their stop loss within 8 hours, something is wrong with the
+  # market or the strategy. Pause all trading rather than keep feeding it money.
+  - method: "StoplossGuard"
+    lookback_period_candles: 96
+    trade_limit: 3
+    stop_duration_candles: 96
+    only_per_pair: false              # applies to the whole account, not one pair
+
+  # After any exit, wait 1 hour before opening a new trade. Prevents rapid
+  # re-entry churn, which mostly generates fees.
+  - method: "CooldownPeriod"
+    stop_duration_candles: 12
+
+# -----------------------------------------------------------------------------
 # EDGE (position-sizing optimiser) - disabled until there is trade history
 # -----------------------------------------------------------------------------
 edge:
@@ -176,7 +209,11 @@ logging:
 # The strategy file is mounted into /freqtrade/user_data via a Swarm config.
 # -----------------------------------------------------------------------------
 strategy: "ModerateMultiPairStrategy"
-strategy_path: "/freqtrade/user_data"
+# Shared with the AI orchestrator (mounted as /app/strategies) so generated
+# strategies can be backtested before the operator is asked to approve them.
+# The operator's own strategy is staged here from a read-only Swarm config by
+# the container entrypoint.
+strategy_path: "/freqtrade/user_data/strategies"
 
 # -----------------------------------------------------------------------------
 # PLOTTING
