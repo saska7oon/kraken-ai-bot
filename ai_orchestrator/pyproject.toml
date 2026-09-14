@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "ai-orchestrator"
 version = "1.0.0"
 description = "AI Orchestrator for Kraken Trading Bot"
-readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.109.0",
@@ -14,6 +13,7 @@ dependencies = [
     "pydantic==2.5.3",
     "pydantic-settings==2.1.0",
     "aiohttp==3.9.1",
+    "aiofiles==23.2.1",
     "PyYAML==6.0.1",
     "python-dotenv==1.0.0",
 ]
@@ -24,6 +24,8 @@ dev = [
     "pytest-asyncio>=0.23.0",
 ]
 
+# The build context root must contain the `ai_orchestrator/` package directory.
+# See ai_orchestrator/Dockerfile for the required build context.
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ai_orchestrator*"]

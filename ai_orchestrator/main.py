@@ -456,8 +456,10 @@ async def update_whitelist(pairs: list):
 # ============================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8082"))
+    # Pass the app object directly (not the "main:app" import string) so this
+    # works regardless of how the process was started / what CWD is set.
     uvicorn.run(
-        "main:app",
+        app,
         host="0.0.0.0",
         port=port,
         log_level="info",

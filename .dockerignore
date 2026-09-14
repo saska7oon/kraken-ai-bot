@@ -1,0 +1,15 @@
+# Root build-context exclusions (ai_orchestrator image builds from repo root)
+.git
+.github
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.venv
+**/venv
+.env
+.env.*
+secrets/
+backup/
+config/
+*.log

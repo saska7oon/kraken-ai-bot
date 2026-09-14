@@ -110,6 +110,63 @@ grep "private key:" age_keys.txt | awk '{print $3}'
 
 ---
 
+## How Secrets Reach the Containers
+
+Secrets are **Swarm secrets** and are mounted read-only at `/run/secrets/<name>`.
+
+**Important:** freqtrade does **not** support the `*_FILE` environment-variable
+convention. `FREQTRADE__EXCHANGE__API_KEY_FILE=/run/secrets/kraken_api_key`
+would be interpreted as the (invalid) config key `exchange.api_key_file` and
+silently ignored — the API key would never load. Freqtrade's only env-var
+override mechanism is `FREQTRADE__SECTION__KEY` with the literal value, which
+would put the secret into the container's environment.
+
+Instead, `config/freqtrade-entrypoint.sh` (deployed as the Swarm **config**
+`freqtrade_entrypoint`, mounted at `/etc/freqtrade-entrypoint.sh`) reads the
+secret *files* and writes a single private config:
+
+```
+/run/secrets/{kraken_api_key,kraken_api_secret,freqtrade_api_password,
+              freqtrade_encrypt_key,discord_webhook}   (Swarm secret, mode 0444)
+        |
+        v  read by /etc/freqtrade-entrypoint.sh
+/dev/shm/freqtrade-private.json                        (tmpfs, RAM only, mode 0600)
+        |
+        v  passed as the last --config (highest precedence)
+freqtrade
+```
+
+Consequences:
+
+- No secret is ever written to disk, a bind mount, a volume, or a `.env` file.
+- No secret is ever placed in an environment variable.
+- The private config disappears when the container stops.
+- `docker inspect` on the task shows only the env vars listed in the stack,
+  which never contain credentials.
+
+The AI orchestrator reads `/run/secrets/openrouter_api_key`,
+`/run/secrets/freqtrade_api_password` and `/run/secrets/discord_webhook`
+directly in `main.py`. It never receives Kraken credentials.
+
+**Non-secret config is delivered as Swarm configs** (not bind mounts), because
+Portainer's repository mode resolves relative bind paths under
+`/data/compose/<id>/`, and Swarm never auto-creates a missing bind-mount source
+directory.
+
+| Swarm config | Source file | Mounted at |
+|--------------|-------------|------------|
+| `freqtrade_base_config` | `config/base.yaml` | `/freqtrade/user_data/base.yaml` |
+| `freqtrade_canada_config` | `config/canada_kraken.yaml` | `/freqtrade/user_data/canada_kraken.yaml` |
+| `freqtrade_strategy` | `config/strategies/moderate_multi.py` | `/freqtrade/user_data/moderate_multi.py` |
+| `freqtrade_entrypoint` | `config/freqtrade-entrypoint.sh` | `/etc/freqtrade-entrypoint.sh` |
+| `freqtrade_ai_config` | `config/ai_orchestrator.yaml` | `/app/config/ai_orchestrator.yaml` |
+
+> When you change any of these files, update the corresponding Portainer config
+> and redeploy the stack. Swarm configs are immutable — edit the config (or
+> delete and recreate it) rather than expecting the file to update in place.
+
+---
+
 ## Secret Rotation Schedule
 
 | Secret | Frequency | Procedure |
@@ -142,6 +199,9 @@ grep "private key:" age_keys.txt | awk '{print $3}'
 |-------|----------|
 | "Secret not found" on deploy | Verify exact name match in Portainer Secrets |
 | Backup fails authentication | Check Nextcloud app password + WebDAV URL format |
-| Freqtrade can't decrypt config | `freqtrade_encrypt_key` mismatch — restore from backup |
+| Bot runs but has no exchange key | You used a `*_FILE` env var. freqtrade ignores those — use `config/freqtrade-entrypoint.sh` (see "How Secrets Reach the Containers") |
+| `bind source path does not exist` | You used a bind mount. Swarm does not create bind sources — use a Swarm config instead |
+| `ModuleNotFoundError: ai_orchestrator` | The orchestrator image was built with the wrong context. It must be built from the repo root with `file: ai_orchestrator/Dockerfile` |
+| `429` / `EAPI:Rate limit exceeded` from Kraken | Raise `exchange.ccxt_async_config.rateLimit` in `config/canada_kraken.yaml` (default 3500 ms) |
 | AI Orchestrator 401 errors | `freqtrade_api_password` mismatch between secrets |
 | Portainer shows "ConfigMap not found" | Secret name in stack ≠ secret name in Portainer |

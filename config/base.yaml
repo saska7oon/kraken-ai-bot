@@ -1,258 +1,209 @@
+# =============================================================================
 # Freqtrade Base Configuration
-# This file contains common settings shared across all deployments
-# Override with environment-specific configs (e.g., canada_kraken.yaml)
+# =============================================================================
+# This file contains NO secrets. Credentials are injected at container start
+# by /etc/freqtrade-entrypoint.sh, which reads the Docker Swarm secrets and
+# generates an ephemeral private config in tmpfs (/dev/shm).
+#
+# DO NOT add api keys, passwords or webhook URLs to this file.
+# =============================================================================
 
-# ============================================================
-# EXCHANGE SETTINGS
-# ============================================================
+# -----------------------------------------------------------------------------
+# EXCHANGE
+# -----------------------------------------------------------------------------
 exchange:
   name: "kraken"
-  # API credentials loaded from environment variables (Docker secrets)
-  # api_key: "${FREQTRADE__EXCHANGE__API_KEY}"
-  # secret: "${FREQTRADE__EXCHANGE__SECRET}"
-  # CCXT configuration for rate limiting
+
+  # Credentials come from the generated private config, never from this file.
+  # key:    ""   <- provided at runtime
+  # secret: ""   <- provided at runtime
+
   ccxt_config:
     enableRateLimit: true
+
   ccxt_async_config:
     enableRateLimit: true
-    rateLimit: 3100  # Kraken requires ~3.1s between calls
-  # Market types
-  market_type: "spot"
-  # Skip pairs with issues
+    rateLimit: 3500          # Kraken requires ~3s between calls
+
   skip_pair_validation: false
 
-# ============================================================
-# TRADING SETTINGS
-# ============================================================
-# Stake currency - CAD for Kraken Canada
+  # StaticPairList reads the whitelist from here. Overridden in
+  # canada_kraken.yaml with the CAD pairs.
+  pair_whitelist:
+    - "BTC/CAD"
+
+  # Pair blacklist. Glob patterns are supported.
+  pair_blacklist:
+    - ".*/BULL"              # freqtrade blacklist entries are regexes
+    - ".*/BEAR"
+    - ".*/HALF"
+    - ".*/HEDGE"
+    - "PEPE/CAD"
+
+# -----------------------------------------------------------------------------
+# PAIRLIST HANDLER
+# -----------------------------------------------------------------------------
+pairlists:
+  - method: "StaticPairList"
+
+# -----------------------------------------------------------------------------
+# STAKE / TRADING
+# -----------------------------------------------------------------------------
 stake_currency: "CAD"
-# Display profits in CAD
 fiat_display_currency: "CAD"
 
-# Dry-run mode (ALWAYS start with true)
+# ALWAYS start with dry_run: true
 dry_run: true
-# Simulated starting wallet
-dry_run_wallet: 1000
+dry_run_wallet: 1000         # simulated wallet, CAD
 
-# Maximum open trades
 max_open_trades: 3
-# Stake amount per trade - "unlimited" uses tradable_balance_ratio
 stake_amount: "unlimited"
-# Ratio of total balance available for trading (0.90 = 90%)
 tradable_balance_ratio: 0.90
-# Reserve percentage for fees/slippage
 amount_reserve_percent: 0.05
 
-# Amend last stake amount if needed
 amend_last_stake_amount: true
 last_stake_amount_min_ratio: 0.5
 
-# ============================================================
-# RISK MANAGEMENT
-# ============================================================
-# Stoploss (8% for moderate risk)
+# -----------------------------------------------------------------------------
+# RISK MANAGEMENT (moderate profile)
+# -----------------------------------------------------------------------------
 stoploss: -0.08
 
-# Trailing stoploss
 trailing_stop: true
-trailing_stop_positive: 0.02      # Start trailing at 2% profit
-trailing_stop_positive_offset: 0.03  # Offset from stoploss
+trailing_stop_positive: 0.02
+trailing_stop_positive_offset: 0.03
 trailing_only_offset_is_reached: false
 
-# Minimal ROI table (time in minutes -> profit ratio)
 minimal_roi:
-  "0": 0.04    # 4% immediate target
-  "30": 0.02   # 2% after 30 minutes
-  "60": 0.01   # 1% after 1 hour
-  "120": 0     # Break-even after 2 hours
+  "0": 0.04
+  "30": 0.02
+  "60": 0.01
+  "120": 0
 
-# ============================================================
-# TIMEFRAME & CANDLE SETTINGS
-# ============================================================
-# Default timeframe (can be overridden by strategy)
+# Exchange-side stoploss (only takes effect when dry_run: false)
+# stoploss_on_exchange: true
+# stoploss_on_exchange_interval: 60
+
+# -----------------------------------------------------------------------------
+# TIMEFRAME
+# -----------------------------------------------------------------------------
 timeframe: "5m"
-# Process only new candles (more efficient)
 process_only_new_candles: true
 
-# ============================================================
-# PAIR LIST SETTINGS
-# ============================================================
-pairlists:
-  - method: "StaticPairList"
-    config:
-      # Pairs defined in environment-specific config
-      # pairlist: []
+# -----------------------------------------------------------------------------
+# DATA STORAGE
+# -----------------------------------------------------------------------------
+dataformat_ohlcv: "json"
+dataformat_trades: "jsongz"
 
-# Blacklist pairs we don't want to trade
-blacklist:
-  # Stablecoin pairs (optional - enable in canada_kraken.yaml if desired)
-  # - "USDC/CAD"
-  # - "USDT/CAD"
-  # Leveraged tokens
-  - "*/BULL"
-  - "*/BEAR"
-  - "*/HALF"
-  - "*/HEDGE"
-  # Low volume / problematic pairs
-  - "PEPE/CAD"
-
-# ============================================================
-# DATAPROVIDER SETTINGS
-# ============================================================
-dataprovider:
-  # Use CCXT for data (same as exchange)
-  dataformat_ohlcv: "json"
-  dataformat_trades: "jsongz"
-  # Candle history for backtesting
-  candles_download:
-    exchange: "kraken"
-    dataformat: "json"
-    days: 30
-
-# ============================================================
-# EDGE SETTINGS (Position Sizing Optimization)
-# ============================================================
+# -----------------------------------------------------------------------------
+# EDGE (position-sizing optimiser) - disabled until there is trade history
+# -----------------------------------------------------------------------------
 edge:
-  enabled: true
-  process_throttle_secs: 3600  # Recalculate hourly
+  enabled: false
+  process_throttle_secs: 3600
   calculate_since_number_of_days: 30
-  # Minimum trade history required
   minimum_trade_history: 10
-  # Capital available for edge
   capital_available_percentage: 0.5
-  # Stoploss range for optimization
   stoploss_range_min: -0.15
   stoploss_range_max: -0.03
   stoploss_range_step: 0.01
 
-# ============================================================
-# TELEGRAM SETTINGS (Optional)
-# ============================================================
+# -----------------------------------------------------------------------------
+# TELEGRAM (disabled)
+# -----------------------------------------------------------------------------
 telegram:
   enabled: false
-  # token: "${TELEGRAM_TOKEN}"
-  # chat_id: "${TELEGRAM_CHAT_ID}"
 
-# ============================================================
-# DISCORD SETTINGS
-# ============================================================
+# -----------------------------------------------------------------------------
+# DISCORD
+# webhook_url is injected from the Swarm secret by the entrypoint.
+# -----------------------------------------------------------------------------
 discord:
   enabled: true
-  # webhook_url loaded from Docker secret
-  # webhook_url: "${FREQTRADE__DISCORD__WEBHOOK_URL}"
-  # Notification types
-  notifications:
-    trade_entry: true
-    trade_exit: true
-    trade_adjustment: true
-    trade_failed: true
-    status: true
-    warning: true
-    error: true
-    startup: true
-    shutdown: true
+  entry_fill: true
+  exit_fill: true
+  entry_cancel: true
+  exit_cancel: true
+  protection_trigger: true
+  protection_trigger_global: true
+  status: true
+  warning: true
+  startup: true
 
-# ============================================================
-# API SERVER (REST API for AI Orchestrator)
-# ============================================================
+# -----------------------------------------------------------------------------
+# API SERVER (REST API used by the AI Orchestrator + serves FreqUI)
+# username/password/jwt_secret_key/ws_token are injected from Swarm secrets.
+# -----------------------------------------------------------------------------
 api_server:
   enabled: true
   listen_ip_address: "0.0.0.0"
   listen_port: 8080
-  # Username/password from Docker secrets
-  # username: "freqtrade"
-  # password: "${FREQTRADE__API_SERVER__PASSWORD}"
   verbosity: "info"
   enable_openapi: true
-  jwt_secret_key: "${FREQTRADE__CONFIG__ENCRYPT_KEY}"
-  ws_token: "${FREQTRADE__CONFIG__ENCRYPT_KEY}"
-  # CORS for AI Orchestrator
-  cors_origins:
+  CORS_origins:
     - "http://localhost:8082"
+    - "http://127.0.0.1:8082"
 
-# ============================================================
-# WEB SERVER (FreqUI)
-# ============================================================
+# -----------------------------------------------------------------------------
+# WEBSERVER (FreqUI)
+# -----------------------------------------------------------------------------
 webserver:
   enabled: true
   listen_ip_address: "0.0.0.0"
   listen_port: 8081
-  # Same auth as API server
-  # username: "freqtrade"
-  # password: "${FREQTRADE__API_SERVER__PASSWORD}"
+  verbosity: "info"
 
-# ============================================================
+# -----------------------------------------------------------------------------
 # DATABASE
-# ============================================================
+# -----------------------------------------------------------------------------
 db_url: "sqlite:////freqtrade/user_data/data/tradesv3.sqlite"
 
-# ============================================================
+# -----------------------------------------------------------------------------
 # LOGGING
-# ============================================================
+# -----------------------------------------------------------------------------
 logging:
   logfile: "/freqtrade/user_data/logs/freqtrade.log"
   loglevel: "INFO"
   logfile_level: "DEBUG"
   syslog: false
-  # Rotate logs
   logrotate: true
-  logrotate_max_bytes: 10485760  # 10MB
+  logrotate_max_bytes: 10485760
   logrotate_backup_count: 10
 
-# ============================================================
-# STRATEGY SETTINGS
-# ============================================================
+# -----------------------------------------------------------------------------
+# STRATEGY
+# The strategy file is mounted into /freqtrade/user_data via a Swarm config.
+# -----------------------------------------------------------------------------
 strategy: "ModerateMultiPairStrategy"
-strategy_path: "/freqtrade/user_data/strategies"
+strategy_path: "/freqtrade/user_data"
 
-# ============================================================
-# BACKTESTING SETTINGS
-# ============================================================
-backtesting:
-  data_directory: "/freqtrade/user_data/data"
-  export: "trades"
-  export_filename: "backtest_result.json"
-
-# ============================================================
+# -----------------------------------------------------------------------------
 # PLOTTING
-# ============================================================
+# -----------------------------------------------------------------------------
 plot:
-  enabled: true
-  plotly: true
   main_plot:
-    # Moving averages
-    ema_9: {"color": "blue"}
-    ema_21: {"color": "orange"}
-    ema_50: {"color": "green"}
-    ema_200: {"color": "red"}
-    # Bollinger Bands
-    bb_lowerband: {"color": "gray"}
-    bb_middleband: {"color": "gray"}
-    bb_upperband: {"color": "gray"}
+    ema_9: {color: "blue"}
+    ema_21: {color: "orange"}
+    ema_50: {color: "green"}
+    ema_200: {color: "red"}
+    bb_lowerband: {color: "gray"}
+    bb_middleband: {color: "gray"}
+    bb_upperband: {color: "gray"}
   subplots:
     rsi:
-      rsi: {"color": "purple"}
-      rsi_overbought: {"color": "red"}
-      rsi_oversold: {"color": "green"}
+      rsi: {color: "purple"}
+      rsi_overbought: {color: "red"}
+      rsi_oversold: {color: "green"}
     macd:
-      macd: {"color": "blue"}
-      macdsignal: {"color": "orange"}
-      macdhist: {"color": "green"}
+      macd: {color: "blue"}
+      macdsignal: {color: "orange"}
+      macdhist: {color: "green"}
 
-# ============================================================
-# DRY-RUN WALLET DETAILS
-# ============================================================
-dry_run_wallet:
-  CAD: 1000
-
-# ============================================================
-# CANCEL ORDERS ON EXIT
-# ============================================================
+# -----------------------------------------------------------------------------
+# OPERATIONAL
+# -----------------------------------------------------------------------------
 cancel_open_orders_on_exit: true
 
-# ============================================================
-# INTERNAL SETTINGS
-# ============================================================
 internals:
   process_throttle_secs: 5
-  heartbeat_interval: 60

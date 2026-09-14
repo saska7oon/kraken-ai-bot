@@ -11,6 +11,8 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import aiofiles
+
 from ai_orchestrator.core.plugin_manager import BasePlugin, PluginConfig
 
 logger = logging.getLogger(__name__)

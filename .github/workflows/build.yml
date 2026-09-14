@@ -63,7 +63,10 @@ jobs:
         id: build-orchestrator
         uses: docker/build-push-action@v5
         with:
-          context: ./ai_orchestrator
+          # Context MUST be the repo root so the `ai_orchestrator/` package
+          # lands at /app/ai_orchestrator inside the image.
+          context: .
+          file: ai_orchestrator/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-orchestrator.outputs.tags }}
           labels: ${{ steps.meta-orchestrator.outputs.labels }}

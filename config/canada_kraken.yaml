@@ -1,25 +1,47 @@
-# Canada-Specific Kraken Configuration
-# Overrides base.yaml for Kraken Canada (CAD markets)
-# This file is loaded AFTER base.yaml, so it takes precedence
+# =============================================================================
+# Kraken Canada overrides
+# =============================================================================
+# Loaded AFTER base.yaml, so anything defined here wins.
+# Contains NO secrets.
+# =============================================================================
 
-# ============================================================
-# EXCHANGE OVERRIDES FOR KRAKEN CANADA
-# ============================================================
+# -----------------------------------------------------------------------------
+# EXCHANGE - KRAKEN CANADA
+# -----------------------------------------------------------------------------
 exchange:
   name: "kraken"
-  # Canada-specific rate limiting (Kraken is strict)
   ccxt_async_config:
     enableRateLimit: true
-    rateLimit: 3500  # Slightly more conservative than base 3100
-  # Only spot trading for Canadian users (no margin/futures)
-  market_type: "spot"
-  trading_mode: "spot"
-  # Pair formatting for Kraken
-  pair_format: "kraken"
+    rateLimit: 3500          # conservative: Kraken is strict
 
-# ============================================================
-# TRADING SETTINGS - CANADA OPTIMIZED
-# ============================================================
+  # Kraken Canada (Kraken Canada Inc., Registered Restricted Dealer under the
+  # OSC/CSA) offers SPOT only: no margin, no futures/derivatives, no xStocks.
+
+  # StaticPairList whitelist - the only 4 crypto/CAD pairs Kraken Canada lists.
+  pair_whitelist:
+    - "BTC/CAD"              # XXBTZCAD
+    - "ETH/CAD"              # XETHZCAD
+    - "SOL/CAD"              # SOLCAD
+    - "XRP/CAD"              # XXRPZCAD
+
+  pair_blacklist:
+    - "USDC/CAD"             # stablecoins: available, but not traded
+    - "USDT/CAD"
+    - "PEPE/CAD"             # memecoin, low quality
+    - ".*/BULL"
+    - ".*/BEAR"
+    - ".*/HALF"
+    - ".*/HEDGE"
+
+# -----------------------------------------------------------------------------
+# PAIRLIST
+# -----------------------------------------------------------------------------
+pairlists:
+  - method: "StaticPairList"
+
+# -----------------------------------------------------------------------------
+# STAKE / DRY-RUN
+# -----------------------------------------------------------------------------
 stake_currency: "CAD"
 fiat_display_currency: "CAD"
 dry_run: true
@@ -30,36 +52,9 @@ stake_amount: "unlimited"
 tradable_balance_ratio: 0.90
 amount_reserve_percent: 0.05
 
-# ============================================================
-# PAIR WHITELIST - KRAKEN CANADA LIQUID CAD PAIRS (2026)
-# ============================================================
-pairlists:
-  - method: "StaticPairList"
-    config:
-      pairlist:
-        - "BTC/CAD"   # XXBTZCAD - 17.3 BTC/24h vol
-        - "ETH/CAD"   # XETHZCAD - 420 ETH/24h vol
-        - "SOL/CAD"   # SOLCAD - 6,098 SOL/24h vol
-        - "XRP/CAD"   # XXRPZCAD - 503k XRP/24h vol
-
-# ============================================================
-# BLACKLIST - EXCLUDE PROBLEMATIC PAIRS
-# ============================================================
-blacklist:
-  # Stablecoins (available but disabled by default)
-  - "USDC/CAD"
-  - "USDT/CAD"
-  # Memecoins / low quality
-  - "PEPE/CAD"
-  # Leveraged tokens (not available on Kraken spot but safe to blacklist)
-  - "*/BULL"
-  - "*/BEAR"
-  - "*/HALF"
-  - "*/HEDGE"
-
-# ============================================================
-# RISK MANAGEMENT - MODERATE PROFILE
-# ============================================================
+# -----------------------------------------------------------------------------
+# RISK - MODERATE PROFILE
+# -----------------------------------------------------------------------------
 stoploss: -0.08
 
 trailing_stop: true
@@ -73,106 +68,33 @@ minimal_roi:
   "60": 0.01
   "120": 0
 
-# ============================================================
-# VOLUME PAIRLIST (Optional - Dynamic Pair Selection)
-# ============================================================
-# Uncomment to enable dynamic pair selection based on volume
-# pairlists:
-#   - method: "VolumePairList"
-#     number_assets: 20
-#     sort_key: "quoteVolume"
-#     refresh_period: 1800
-#     config:
-#       exchange: "kraken"
-#       min_value: 10000
-#       max_value: 100000000
-#     filters:
-#       - method: "RangeFilter"
-#         config:
-#           min: 0.0001
-#           max: 1000000
-#       - method: "AgeFilter"
-#         config:
-#           min_days: 30
-#       - method: "ShuffleFilter"
-#         config:
-#           seed: 42
-
-# ============================================================
+# -----------------------------------------------------------------------------
 # STRATEGY
-# ============================================================
+# -----------------------------------------------------------------------------
 strategy: "ModerateMultiPairStrategy"
-strategy_path: "/freqtrade/user_data/strategies"
 
-# ============================================================
-# DATA PROVIDER - KRAKEN HISTORICAL DATA
-# ============================================================
-dataprovider:
-  dataformat_ohlcv: "json"
-  dataformat_trades: "jsongz"
-  candles_download:
-    exchange: "kraken"
-    dataformat: "json"
-    days: 30
-  # Kraken only provides 720 candles via REST
-  # For backtesting, use --dl-trades flag
-  # Trades data downloaded to user_data/data/kraken/trades_csv/
-
-# ============================================================
-# EDGE - POSITION SIZING OPTIMIZATION
-# ============================================================
-edge:
-  enabled: true
-  process_throttle_secs: 3600
-  calculate_since_number_of_days: 30
-  minimum_trade_history: 10
-  capital_available_percentage: 0.5
-  stoploss_range_min: -0.15
-  stoploss_range_max: -0.03
-  stoploss_range_step: 0.01
-
-# ============================================================
-# DISCORD NOTIFICATIONS
-# ============================================================
-discord:
-  enabled: true
-  # webhook_url from Docker secret
-  notifications:
-    trade_entry: true
-    trade_exit: true
-    trade_adjustment: true
-    trade_failed: true
-    status: true
-    warning: true
-    error: true
-    startup: true
-    shutdown: true
-
-# ============================================================
-# API SERVER - FOR AI ORCHESTRATOR
-# ============================================================
+# -----------------------------------------------------------------------------
+# API SERVER
+# -----------------------------------------------------------------------------
 api_server:
   enabled: true
   listen_ip_address: "0.0.0.0"
   listen_port: 8080
   verbosity: "info"
   enable_openapi: true
-  cors_origins:
+  CORS_origins:
     - "http://localhost:8082"
     - "http://127.0.0.1:8082"
 
-# ============================================================
-# WEBSERVER - FREQUI
-# ============================================================
 webserver:
   enabled: true
   listen_ip_address: "0.0.0.0"
   listen_port: 8081
   verbosity: "info"
 
-# ============================================================
+# -----------------------------------------------------------------------------
 # LOGGING
-# ============================================================
+# -----------------------------------------------------------------------------
 logging:
   logfile: "/freqtrade/user_data/logs/freqtrade.log"
   loglevel: "INFO"
@@ -182,26 +104,25 @@ logging:
   logrotate_max_bytes: 10485760
   logrotate_backup_count: 10
 
-# ============================================================
-# TIMEZONE - CANADA EASTERN
-# ============================================================
-# Set via TZ=America/Toronto in docker-compose environment
-
-# ============================================================
-# DRY-RUN WALLET
-# ============================================================
-dry_run_wallet:
-  CAD: 1000
-
-# ============================================================
-# CANADA-SPECIFIC NOTES
-# ============================================================
-# REGULATORY: Kraken Canada operates as Restricted Dealer (OSC/CSA)
-# RESTRICTIONS FOR CANADIAN USERS:
-# - NO margin trading
-# - NO futures/derivatives
-# - NO xStocks (tokenized equities)
-# - LIMITED staking (no GRT, FLR Opt-in Rewards)
-# - SPOT trading fully available
-# FUNDING: Interac e-Transfer, Wire transfer (CAD)
-# TAX: All gains/losses in CAD - simplifies CRA reporting
+# =============================================================================
+# NOTES
+# =============================================================================
+# REGULATORY: Kraken Canada Inc. is a Registered Restricted Dealer (OSC lead,
+#   CSA members). Permitted: spot trading, Interac e-Transfer + wire funding.
+#   Not permitted: margin, futures/derivatives, xStocks, most staking.
+# TAX: all gains/losses are already denominated in CAD, which simplifies CRA
+#   reporting.
+# BACKTESTING: Kraken's REST API only returns ~720 historic candles. Use
+#   `freqtrade download-data --dl-trades` for longer backtest history.
+#
+# Optional dynamic pair selection (do NOT enable together with the
+# StaticPairList above):
+#
+# pairlists:
+#   - method: "VolumePairList"
+#     number_assets: 4
+#     sort_key: "quoteVolume"
+#     refresh_period: 1800
+#     filters:
+#       - method: "AgeFilter"
+#         min_days: 30
