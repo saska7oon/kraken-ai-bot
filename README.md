@@ -525,6 +525,100 @@ consider live money once you understand *why* it makes the trades it makes.
 
 ---
 
+## 💰 Switching from dry run to real money
+
+The bot ships in **dry run**: it simulates every trade against real Kraken prices
+with a fake $1,000 CAD wallet. No real money moves. Nothing you do in the UI or
+the API can change that — the switch is not exposed to the AI, by design.
+
+### Before you switch — this is the important part
+
+**Close every open position, then wait for the bot to be flat.**
+
+The bot only manages trades in the database it is currently using. It never
+adopts positions it finds on the exchange — Freqtrade's
+`handle_onexchange_order` only re-finds orders for trades *already in its
+database*. So a position the bot does not know about is a position with **no stop
+loss and no exit rule**. It would sit there unprotected.
+
+If you have real open positions and switch to dry run, the same thing happens in
+reverse: the bot stops managing them.
+
+### The switch itself
+
+Two lines, in `config/canada_kraken.json`, and they must change **together**:
+
+```json
+"dry_run": false,
+"db_url": "sqlite:////freqtrade/user_data/data/tradesv3.sqlite",
+```
+
+Then recreate the `freqtrade_canada_config` Swarm config in Portainer and
+redeploy. To go back to simulation, reverse both lines.
+
+### Why both lines, and why it matters
+
+Freqtrade picks its database from `dry_run` — but **only** when `db_url` is unset
+or exactly equal to its own default. Ours is an absolute path, so that automatic
+choice never happens:
+
+```python
+if dry_run:
+    if db_url in [None, "sqlite:///tradesv3.sqlite"]:
+        db_url = "sqlite:///tradesv3.dryrun.sqlite"
+```
+
+Change only `dry_run` and both modes share **one history file**. Two things break,
+and the second costs money:
+
+1. Profit and win-rate blend simulated trades with real ones, so the number you
+   would use to judge whether the bot works becomes meaningless at exactly the
+   moment it starts to matter.
+2. Open dry-run trades are still in the database when you go live, so the bot
+   tries to manage positions that **do not exist on Kraken** — selling assets you
+   never bought.
+
+Neither symptom appears in the logs. `tools/preflight_config.py` therefore
+refuses to pass if the two disagree, in either direction, and CI runs it on every
+build.
+
+### Can you switch back and forth?
+
+**Yes, and nothing is lost** — because the two modes use separate files:
+
+| Mode | Database | What happens on switching back |
+|------|----------|-------------------------------|
+| Dry run | `tradesv3.dryrun.sqlite` | Your simulation history is exactly where you left it |
+| Live | `tradesv3.sqlite` | Your real trade history is exactly where you left it |
+
+Neither file is deleted or merged, so each mode resumes with its own history and
+its own stats. Your dry-run results are never polluted by real trades, and your
+real results are never diluted by simulations.
+
+The one rule is the same in both directions: **close all open positions first**,
+for the reason above.
+
+### What happens to your stats
+
+- **Dry-run stats stay dry-run stats.** They remain in the dry-run database and
+  the UI shows them only while you are in dry run.
+- **Live starts with an empty history.** Your first real trade is trade #1, and
+  the profit figure starts from your real starting balance.
+- **The dry-run profit is not a prediction.** A good simulated result means the
+  rules did not blow up on historical prices. It is not evidence about the
+  future, and the bot will never tell you otherwise.
+
+### A sane sequence
+
+1. Run in dry run for **several weeks**, through at least one dip. Watch the
+   digest, read why trades closed, and make sure you understand the rules.
+2. Close all positions, confirm the bot is flat.
+3. Change both lines, redeploy, and confirm the UI shows **Live money** (red).
+4. Start small. `stake_amount` and `max_open_trades` still apply — you do not
+   have to go from $0 to fully invested.
+5. Keep the circuit breakers on. They are the reason a bad week does not become
+   a bad year.
+
 ## 📊 Configuration
 
 ### Risk Profiles

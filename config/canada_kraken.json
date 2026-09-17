@@ -63,8 +63,41 @@
     "stake_currency": "CAD",
     "fiat_display_currency": "CAD",
 
+    // =========================================================================
+    //  THE DRY-RUN / LIVE SWITCH
+    // =========================================================================
+    // These two lines must always change TOGETHER. They live here, side by
+    // side, because this file is merged last and therefore wins - and because
+    // changing one without the other is silent and expensive.
+    //
+    // Freqtrade picks its database from `dry_run`, but only when `db_url` is
+    // unset or exactly its own default. Ours is an absolute path, so that
+    // automatic choice never happens and whichever file is named here is used
+    // in BOTH modes:
+    //
+    //   if dry_run:
+    //       if db_url in [None, "sqlite:///tradesv3.sqlite"]:
+    //           db_url = "sqlite:///tradesv3.dryrun.sqlite"
+    //
+    // One shared file would mean two things:
+    //   1. Profit and win-rate blend simulated trades with real ones, so the
+    //      number you would use to judge the bot becomes meaningless exactly
+    //      when it starts to matter.
+    //   2. Open dry-run trades are still in the database when you go live, so
+    //      the bot tries to manage positions that do not exist on Kraken.
+    //
+    // TO GO LIVE, change both of these, and close every open position first:
+    //     "dry_run": false,
+    //     "db_url": "sqlite:////freqtrade/user_data/data/tradesv3.sqlite",
+    //
+    // TO GO BACK to simulation, reverse both lines. Nothing is deleted: your
+    // live history stays in tradesv3.sqlite and your simulation history stays
+    // in tradesv3.dryrun.sqlite, so each mode resumes where it left off.
+    //
+    // tools/preflight_config.py refuses to start if the two disagree.
     "dry_run": true,
     "dry_run_wallet": 1000,
+    "db_url": "sqlite:////freqtrade/user_data/data/tradesv3.dryrun.sqlite",
 
     // -------------------------------------------------------------------------
     // RISK (moderate profile)

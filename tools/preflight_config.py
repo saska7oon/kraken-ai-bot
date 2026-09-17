@@ -307,6 +307,62 @@ def main() -> int:
     if config.get("dry_run") is not True:
         warnings.append("dry_run is not true - this would place real orders")
 
+    # --- the dry-run / database pairing -----------------------------------
+    # Freqtrade chooses its database from `dry_run`, but ONLY when `db_url` is
+    # unset or exactly its own default ("sqlite:///tradesv3.sqlite"). An absolute
+    # path is neither, so the automatic selection does not fire and one file ends
+    # up serving both modes. Two things then go wrong, and the second costs
+    # money: profit figures blend simulated trades with real ones, and open
+    # dry-run trades are still in the database when the bot goes live, so it
+    # tries to manage positions that do not exist on the exchange.
+    #
+    # Neither symptom is visible in the logs, so it is checked here.
+    db_url = str(config.get("db_url") or "")
+    dry_run = config.get("dry_run")
+    db_is_dryrun = "dryrun" in db_url or "dry-run" in db_url
+    db_is_live = bool(db_url) and not db_is_dryrun
+
+    if not db_url:
+        warnings.append(
+            "db_url is not set, so Freqtrade will use a RELATIVE path "
+            "(tradesv3.sqlite in the working directory) which is probably not on "
+            "a persistent volume - trade history may be lost on redeploy"
+        )
+    elif dry_run is True and db_is_live:
+        errors.append(
+            "dry_run is true but db_url (%s) is not a dry-run database. Dry-run "
+            "history would be written into the live trade database, so profit and "
+            "win-rate would blend simulated trades with real ones, and going live "
+            "later would try to manage positions that do not exist on the "
+            "exchange. Point db_url at a file whose name says 'dryrun'." % db_url
+        )
+    elif dry_run is not True and db_is_dryrun:
+        errors.append(
+            "dry_run is false but db_url (%s) is a dry-run database. Real trades "
+            "would be recorded in the simulation history and the live position "
+            "book would stay empty. Change db_url to the live database in the "
+            "same edit that turns dry_run off." % db_url
+        )
+    elif dry_run is True and db_is_dryrun:
+        infos.append(
+            "dry_run with a dedicated dry-run database (%s) - correct pairing"
+            % db_url.rsplit("/", 1)[-1]
+        )
+    else:
+        infos.append(
+            "LIVE MODE: dry_run is false and db_url is the live database (%s)"
+            % db_url.rsplit("/", 1)[-1]
+        )
+
+    if dry_run is not True:
+        warnings.append(
+            "LIVE TRADING: real money. Close every open position before switching "
+            "in either direction - the bot only manages trades in the database it "
+            "is currently using, and never adopts positions it does not know "
+            "about (handle_onexchange_order only re-finds orders for trades "
+            "already in the database)."
+        )
+
     if not config.get("exchange", {}).get("pair_whitelist"):
         errors.append("exchange.pair_whitelist is empty")
 

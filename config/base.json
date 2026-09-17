@@ -70,7 +70,11 @@
 
     // ALWAYS start with dry_run: true. Switching this to false places real
     // orders with real money, and it cannot be done through the AI interface
-    // or the orchestrator API - only by editing this config and redeploying.
+    // or the orchestrator API - only by editing a config and redeploying.
+    //
+    // This value is a DEFAULT ONLY. config/canada_kraken.json is merged last
+    // and overrides it, so editing the line below has no effect - that is where
+    // the switch actually lives, together with the matching db_url.
     "dry_run": true,
     "dry_run_wallet": 1000,
 
@@ -312,10 +316,14 @@
     },
 
     // -------------------------------------------------------------------------
-    // DATABASE
+    // DATABASE AND DRY-RUN - DELIBERATELY NOT SET HERE
     // -------------------------------------------------------------------------
-    "db_url": "sqlite:////freqtrade/user_data/data/tradesv3.sqlite",
-
+    // NOTE: `db_url` and `dry_run` deliberately do NOT live here. They are in
+    // config/canada_kraken.json, which is merged last and therefore wins, so
+    // that the two settings that must change together sit side by side in one
+    // file. Setting them here would be dead config: silently overridden, and a
+    // trap for anyone who edited this file expecting it to take effect.
+    //
     // -------------------------------------------------------------------------
     // LOGGING
     // -------------------------------------------------------------------------
