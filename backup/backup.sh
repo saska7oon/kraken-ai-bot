@@ -134,6 +134,15 @@ setup_rclone() {
     user=$(load_secret "$NEXTCLOUD_USER_FILE")
     pass=$(load_secret "$NEXTCLOUD_PASS_FILE")
 
+    # A trailing slash is a common copy-paste artifact in a WebDAV URL, and it
+    # is not harmless: rclone appends the remote path to it, so
+    # ".../files/admin/backups/" + "backups/daily" becomes
+    # ".../files/admin/backups//backups/daily". Nextcloud rejects the empty
+    # path segment with "directory not found" - an error that names neither the
+    # slash nor the duplicated folder, and that reads like a credentials
+    # problem when it is nothing of the sort.
+    url="${url%/}"
+
     mkdir -p ~/.config/rclone
     chmod 700 ~/.config/rclone 2>/dev/null || true
 
@@ -154,32 +163,55 @@ EOF
     # Probe the remote before doing any work, and report what rclone actually
     # says when it fails.
     #
-    # Both mkdir calls used to discard stderr and force success with
-    # `|| true`, so a bad URL or wrong app password produced no message at all.
-    # The first sign of trouble was the copy failing minutes later with
-    # "Failed to upload archive to Nextcloud" and no reason. An operator cannot
-    # fix a credential problem they cannot see, and "it failed" is not a
+    # The two mkdir calls used to discard stderr and force success with
+    # `|| true`, so a wrong URL or app password produced no message at all. The
+    # first sign of trouble was the copy failing minutes later with "Failed to
+    # upload archive to Nextcloud" and no reason. "It failed" is not a
     # diagnosis.
     #
-    # The URL is deliberately not printed: it can embed a username. The shape
-    # is echoed instead, which is enough to spot the common mistake of pointing
-    # nextcloud_url at a folder that already ends in /backups while
-    # BACKUP_REMOTE_DIR also starts with backups/.
-    log "WebDAV target shape: $(printf '%s' "$url" | sed -e 's#^\(https\?://\)#\1#' -e 's#/[^/]*$#/...#') + $BACKUP_REMOTE_DIR"
+    # The probe is a mkdir of the full destination, not an `rclone lsd` of the
+    # remote root. lsd was wrong: on WebDAV the remote root IS the URL, so when
+    # nextcloud_url names a folder that has not been created yet, lsd reports
+    # "directory not found" and the run aborts - even though mkdir would have
+    # created it, parents and all. Requiring the folder to pre-exist turns a
+    # working configuration into a failure and tells the operator their
+    # credentials are wrong when they are not.
+    #
+    # Show the target with the account name replaced by "...", and keep the
+    # subpath, because that is the part that says which mistake was made.
+    #
+    # This is two steps rather than one sed pipeline on purpose: chaining a
+    # generic "mask everything after the host" rule after the /files/ rule made
+    # every URL print as "https://host/...", which hid the very distinction the
+    # message exists to show. The generic rule is only a fallback for WebDAV
+    # URLs that do not follow Nextcloud's /files/<user> layout.
+    local masked_url
+    masked_url=$(printf '%s' "$url" | sed -e 's#\(/files/\)[^/]*#\1...#')
+    case "$masked_url" in
+        *"/files/..."*) : ;;
+        *) masked_url=$(printf '%s' "$url" | sed -e 's#^\(https\?://[^/]*\)/.*#\1/...#') ;;
+    esac
+    log "WebDAV target: ${masked_url} + ${BACKUP_REMOTE_DIR}"
 
     local probe_err
-    if ! probe_err=$(rclone lsd "nextcloud:" 2>&1); then
-        error "Cannot reach the Nextcloud remote at all."
-        error "rclone said: ${probe_err}"
-        error "Check the nextcloud_url, nextcloud_user and nextcloud_pass secrets."
-        error "nextcloud_pass must be a Nextcloud APP password, not the account password."
-        return 1
-    fi
-
     if ! probe_err=$(rclone mkdir "$BACKUP_REMOTE_DIR" 2>&1); then
-        error "Reached Nextcloud but could not create $BACKUP_REMOTE_DIR"
+        error "Could not create $BACKUP_REMOTE_DIR on Nextcloud."
         error "rclone said: ${probe_err}"
-        error "A 409 Conflict here usually means the parent folder does not exist."
+        case "$probe_err" in
+            *401*|*403*|*"Unauthorized"*|*"Forbidden"*)
+                error "That looks like an authentication failure: nextcloud_user"
+                error "must be the account name, and nextcloud_pass must be a"
+                error "Nextcloud APP password (Settings -> Security -> Devices &"
+                error "sessions), never the account's login password."
+                ;;
+            *"directory not found"*|*409*)
+                error "That looks like a missing folder rather than a credentials"
+                error "problem. nextcloud_url must point INSIDE your account:"
+                error "  https://<server>/remote.php/dav/files/<username>"
+                error "Point it at the account root, or at a folder that exists."
+                ;;
+        esac
+        error "Cannot use the Nextcloud remote; aborting before touching any data"
         return 1
     fi
 

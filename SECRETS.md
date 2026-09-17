@@ -11,7 +11,7 @@
 | `freqtrade_encrypt_key` | Text | Freqtrade Config Encryption Key | ✅ Yes | `openssl rand -base64 32` |
 | `orchestrator_api_token` | Text | Bearer token for the AI orchestrator API | ✅ Yes | `openssl rand -base64 48` |
 | `discord_webhook` | Text | Discord Webhook URL | ❌ Optional | `https://discord.com/api/webhooks/...` |
-| `nextcloud_url` | Text | Nextcloud WebDAV Backup URL | ❌ Optional | `https://cloud.example.com/remote.php/dav/files/user/backups` |
+| `nextcloud_url` | Text | Nextcloud WebDAV URL — the **account root**, not a backups folder | ❌ Optional | `https://cloud.example.com/remote.php/dav/files/user` |
 | `nextcloud_user` | Text | Nextcloud Username | ❌ Optional | `backupuser` |
 | `nextcloud_pass` | Text | Nextcloud App Password | ❌ Optional | `app_password_xyz` |
 | `backup_encrypt_key` | Text | Age Encryption Public Key | ✅ Yes* | `age1abc123...` |
@@ -93,10 +93,18 @@ grep "private key:" age_keys.txt | awk '{print $3}'
 
 1. **Nextcloud** → Settings → Security → Devices & Sessions → App Passwords
 2. Create app password: `kraken-bot-backup`
-3. **WebDAV URL format**: `https://your-nextcloud.com/remote.php/dav/files/USERNAME/backups`
+3. **WebDAV URL format**: `https://your-nextcloud.com/remote.php/dav/files/USERNAME`
+
+   Point this at your **account root**. Do not append `/backups`: the backup
+   sidecar creates `backups/daily` underneath whatever you give it, so a URL
+   ending in `/backups` produces `.../backups/backups/daily`. That folder is
+   wrong, surprising, and — because Nextcloud answers a bad WebDAV path with
+   "directory not found" — looks exactly like a credentials failure when it is
+   not one.
    - Replace `USERNAME` with your Nextcloud username
    - `backups` folder will be created automatically
-4. Test: `curl -u "username:app_password" "https://your-nextcloud.com/remote.php/dav/files/username/backups/"`
+4. Test: `curl -u "username:app_password" "https://your-nextcloud.com/remote.php/dav/files/username/"`
+   A `207 Multi-Status` reply means the URL and app password are both right.
 
 ---
 
@@ -303,6 +311,7 @@ the API — can silently reconfigure the bot.
 |-------|----------|
 | "Secret not found" on deploy | Verify exact name match in Portainer Secrets |
 | Backup fails authentication | Check Nextcloud app password + WebDAV URL format |
+| `rclone ... directory not found` on upload | The WebDAV URL is wrong, not the password. It must be the **account root** (`.../dav/files/USERNAME`), with no `/backups` suffix. Nextcloud reports a bad path as "directory not found", which reads like a credentials error. The sidecar logs `WebDAV target:` with the account name masked to `...` so you can see which path it is actually using |
 | Bot runs but has no exchange key | You used a `*_FILE` env var. freqtrade ignores those — use `config/freqtrade-entrypoint.sh` (see "How Secrets Reach the Containers") |
 | `bind source path does not exist` | You used a bind mount. Swarm does not create bind sources — use a Swarm config instead |
 | `ModuleNotFoundError: ai_orchestrator` | The orchestrator image was built with the wrong context. It must be built from the repo root with `file: ai_orchestrator/Dockerfile` |
