@@ -243,6 +243,10 @@ class ExplainerPlugin(BasePlugin):
                 "facts": facts,
             }
 
+        # `ai_used` is the field the UI reads to decide whether to label this as
+        # AI-written. It is set on every return path above for that reason: a
+        # missing value would make the label silently default to one answer, and
+        # the label is how the operator knows how much to trust the prose.
         return {"text": narrative, "ai_used": True, "facts": facts}
 
     async def answer_question(self, question: str) -> Dict[str, Any]:

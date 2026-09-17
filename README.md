@@ -230,18 +230,32 @@ supports at runtime:
 | Command | What happens |
 |---------|--------------|
 | "pause trading" / "resume trading" | Bot stops/starts opening new trades. Open positions are still managed. |
-| "only trade BTC/CAD" | Runtime pair restriction (does not survive a restart) |
+| "only trade BTC/CAD" | Runtime pair restriction (does not survive a restart). Refused unless the pair is quoted in your wallet's currency and is not a leveraged token. |
 | "show my status" / "how am I doing?" | Reads real data and explains it |
 | "why did it sell ETH?" | Explains the exit reason in plain language |
 
-**Configuration changes produce a proposal, never an application.** Freqtrade
-reads its configuration at startup and exposes no runtime config-write endpoint;
-the orchestrator cannot write the Swarm config either. So a proposal like
-"switch to conservative" comes back with the exact values to apply and
-`"proposals_applied": false`.
+**Configuration changes produce a proposal, and approving one applies it.**
+Freqtrade exposes no runtime config-*write* endpoint, but it does re-read its
+config files when asked (`POST /reload_config`), so the orchestrator writes the
+approved values to the settings file and triggers the reload. No redeploy, no
+copying values into a Swarm config.
 
-To actually apply it: update the `freqtrade_canada_config` Swarm config in
-Portainer with those values and redeploy. Nothing changes until you do.
+Nothing is applied without your approval, and a proposal that is unapproved,
+expired, already used, or tampered with is refused rather than applied.
+
+**One exception, stated plainly.** The *strategy* is set by a `--strategy`
+command-line argument, and Freqtrade's own `_process_common_options` overwrites
+the config value with it:
+
+```python
+if self.args.get("strategy") or not config.get("strategy"):
+    config.update({"strategy": self.args.get("strategy")})
+```
+
+So a strategy written into the settings file would be silently ignored. Strategy
+changes are marked as needing a redeploy and the AI says so, rather than
+reporting a success you would never see. A test asserts that everything the AI
+can propose is either applicable or honestly marked as not.
 
 ### Approval flow
 
@@ -524,6 +538,66 @@ dry-run period as the lesson: watch what it does, read the digest, and only
 consider live money once you understand *why* it makes the trades it makes.
 
 ---
+
+## 🔑 Where credentials live
+
+**Every credential is a Docker Swarm secret, created in Portainer.** Nothing is
+read from a file in this repository, and there is no directory here to put one
+in.
+
+A `secrets/` directory used to exist, containing instructions to write your
+Kraken keys and passwords to plain text files and have them "mounted as Docker
+secrets". That was wrong twice over: it contradicted the architecture this
+project uses, and putting a file in a directory does not create a Docker secret
+— secrets are created with `docker secret create` (or the Portainer UI) and
+mounted by the runtime at `/run/secrets/<name>`. Following it would have left
+your Kraken API keys in plaintext inside a git repository.
+
+The stack declares each one as external and never contains a value:
+
+```yaml
+secrets:
+  kraken_api_key:
+    external: true
+```
+
+Each service mounts only what it needs, and Freqtrade reads them through `_FILE`
+environment variables, so no value ever appears in an environment variable, a
+command line, or a config file:
+
+```
+FREQTRADE__EXCHANGE__API_KEY_FILE=/run/secrets/kraken_api_key
+FREQTRADE__EXCHANGE__SECRET_FILE=/run/secrets/kraken_api_secret
+```
+
+| Secret name | What it is | Needed by |
+|-------------|------------|-----------|
+| `kraken_api_key` | Kraken API key (public half) | freqtrade |
+| `kraken_api_secret` | Kraken API private key | freqtrade |
+| `freqtrade_api_password` | Password for Freqtrade's REST API | freqtrade, orchestrator |
+| `freqtrade_encrypt_key` | Encrypts the Freqtrade config | freqtrade |
+| `openrouter_api_key` | OpenRouter key for the AI features | orchestrator |
+| `discord_webhook` | Discord webhook URL for notifications | orchestrator |
+| `orchestrator_api_token` | Bearer token for the orchestrator's own API | orchestrator |
+| `nextcloud_url` | Nextcloud WebDAV backup destination | backup sidecar |
+| `nextcloud_user` | Nextcloud username | backup sidecar |
+| `nextcloud_pass` | Nextcloud app password | backup sidecar |
+| `backup_encrypt_key` | Age public key for encrypted backups | backup sidecar |
+
+Generate random values with `openssl rand -base64 32` and paste them straight
+into Portainer's secret dialog. Do not write them to a file first.
+
+**The bot cannot read your Kraken keys.** The orchestrator runs as a separate
+container and is not given `kraken_api_key` or `kraken_api_secret`. It talks to
+Freqtrade over the REST API, so it can place no order Freqtrade would not have
+placed itself and cannot read or transmit your exchange credentials. That
+separation is what lets the AI be given broad control over strategy and settings
+without being able to withdraw anything.
+
+**If a key may have leaked:** rotate it at the source (Kraken, OpenRouter,
+Discord) and recreate the secret. Deleting the secret alone does not invalidate
+the key — the old value stays valid at the provider until you revoke it there.
+Kraken also offers an IP allowlist on API keys; use it.
 
 ## 🏷️ What the strategy is called
 

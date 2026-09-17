@@ -1,4 +1,9 @@
 # Secrets - NEVER COMMIT
+#
+# There is no secrets/ directory in this repository and there should not be one:
+# credentials are Docker Swarm secrets created in Portainer. The entry is kept as
+# a backstop, so that a directory by that name created by habit cannot be
+# committed. See "Where credentials live" in README.md.
 secrets/
 *.key
 *.pem
@@ -52,8 +57,11 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Generated strategies
-config/strategies/generated/
+# Generated strategies are written to the SHARED strategies volume at
+# /app/strategies (mounted from the kraken-strategies-shared volume), not into
+# this repository - so there is nothing here to ignore. The old
+# config/strategies/generated/ entry was removed because it named a path that
+# has never existed, which makes a reader think the directory is in use.
 
 # Audit logs
 **/audit/

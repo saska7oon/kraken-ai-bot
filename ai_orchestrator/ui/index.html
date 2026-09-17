@@ -621,12 +621,20 @@ async function loadDigest(force) {
       box.appendChild(el("div", null, text));
     }
     clear(src);
-    const generated = d.generated_at || d.timestamp;
+    // The label says how much to trust what is above it, so it has to be right.
+    // It previously read d.ai_generated and d.source, neither of which this
+    // endpoint returns - so the condition never matched and the panel credited
+    // the AI for text the bot had computed itself. The field that exists is
+    // ai_used.
+    const byAi = d.ai_used === true;
     src.appendChild(el("span", null,
-      d.ai_generated === false || d.source === "deterministic"
-        ? "Written by the bot itself (no AI needed)"
-        : "Written by AI from your real numbers"));
-    if (generated) src.appendChild(el("span", "muted", "\u00b7 " + when(generated)));
+      byAi
+        ? "Written by AI from your real numbers"
+        : "Written by the bot itself from its own figures"));
+    // When the AI was skipped, say why. "No summary from the AI" with no reason
+    // looks like a fault; "no API key configured" is a fact the operator can act
+    // on, and it is also the honest explanation for the plainer wording.
+    if (!byAi && d.reason) src.appendChild(el("span", "muted", "\u00b7 " + d.reason));
   } catch (e) {
     if (e.auth) return signOut(e.message);
     clear(box);

@@ -195,6 +195,31 @@ _STRATEGY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 # the bot's whitelist/blacklist machinery.
 _PAIR_RE = re.compile(r"^[A-Za-z0-9]{2,15}/[A-Za-z0-9]{2,15}$")
 
+# Quote currencies the operator is willing to hold. Freqtrade's stake_currency is
+# CAD for this bot, and a pair quoted in anything else does not match the wallet:
+# the bot would be asked to buy something it cannot pay for with the balance it
+# has, or to value trades in a currency the operator never chose. Configurable,
+# so changing stake_currency does not silently leave this behind.
+DEFAULT_ALLOWED_QUOTES = ("CAD",)
+
+# Kraken lists 3x leveraged tokens that LOOK like ordinary coins. They reset
+# daily, decay in a sideways market, and can lose most of their value in days -
+# the single most dangerous thing a beginner can be talked into buying. The
+# strategy is spot-only long, so these are never appropriate here.
+#
+# Matched on the base asset. Anchored at the end so a real coin that merely
+# contains these letters (e.g. "BULLISH") is not caught by accident, and
+# case-insensitive because Kraken's own symbols are inconsistent.
+LEVERAGED_TOKEN_PATTERN = re.compile(
+    r"(?:"
+    r"\d+L|\d+S"          # 3L, 5S - the Bybit/Binance style
+    r"|UP$|DOWN$"           # BTCUP, ETHDOWN
+    r"|BULL$|BEAR$"         # XBTEURBULL style
+    r"|3X$|5X$"             # explicit leverage markers
+    r")",
+    re.IGNORECASE,
+)
+
 # -----------------------------------------------------------------------------
 # PENDING PROPOSAL STORE
 # -----------------------------------------------------------------------------
@@ -360,6 +385,17 @@ class NLConfigPlugin(BasePlugin):
         self.audit = orchestrator.audit_logger
 
         self.auto_apply_safe = config.config.get("auto_apply_safe", False)
+
+        # Quote currencies the operator is willing to hold, defaulting to CAD.
+        # Read from plugin config so a change to the bot's stake_currency does not
+        # leave this rule silently enforcing the wrong currency.
+        configured_quotes = config.config.get("allowed_quote_currencies")
+        if isinstance(configured_quotes, list) and configured_quotes:
+            self.allowed_quote_currencies = tuple(
+                str(q).strip().upper() for q in configured_quotes if str(q).strip()
+            ) or DEFAULT_ALLOWED_QUOTES
+        else:
+            self.allowed_quote_currencies = DEFAULT_ALLOWED_QUOTES
         self.require_approval_for = config.config.get(
             "require_approval_for",
             ["change_risk", "whitelist_change", "strategy_change", "stoploss_change"],
@@ -1051,17 +1087,12 @@ Examples:
                     "request was refused."
                 )
                 return normalised
-            cleaned: List[str] = []
-            for pair in pairs:
-                if not isinstance(pair, str) or not _PAIR_RE.match(pair.strip()):
-                    normalised["invalid"] = True
-                    normalised["reason"] = (
-                        f"'{pair}' is not a trading pair I recognise. Pairs look like "
-                        "'BTC/CAD'."
-                    )
-                    return normalised
-                cleaned.append(pair.strip().upper())
-            normalised["pairs"] = cleaned
+            problem = self._check_pair_list(pairs)
+            if problem is not None:
+                normalised["invalid"] = True
+                normalised["reason"] = problem
+                return normalised
+            normalised["pairs"] = [p.strip().upper() for p in pairs]
             return normalised
 
         if kind in PLUGIN_RUN_CHANGE_TYPES:
@@ -1751,6 +1782,58 @@ Examples:
         except FreqtradeAPIError as e:
             return {"change": change, "status": "failed", "error": str(e)}
 
+    def _check_pair_list(self, pairs: Any) -> Optional[str]:
+        """Why this pair list is unacceptable, or None if it is fine.
+
+        One implementation used by both the validator and the handler. The
+        validator stops a bad list from ever being *proposed*; the handler stops
+        one from reaching the exchange. Two copies of this rule would drift, and
+        the copy that drifted would be the one guarding the money.
+
+        The rules exist because the pair list is the one setting that decides
+        WHAT the bot buys, and it arrives as free text from a language model.
+        """
+        if not isinstance(pairs, list) or not pairs:
+            return "No list of coins was given."
+
+        allowed_quotes = getattr(self, "allowed_quote_currencies", DEFAULT_ALLOWED_QUOTES)
+
+        for pair in pairs:
+            if not isinstance(pair, str):
+                return "'%s' is not a trading pair I recognise. Pairs look like 'BTC/CAD'." % (pair,)
+
+            cleaned = pair.strip().upper()
+            if not _PAIR_RE.match(cleaned):
+                return (
+                    "'%s' is not a trading pair I recognise. Pairs look like "
+                    "'BTC/CAD'." % pair
+                )
+
+            base, quote = cleaned.split("/", 1)
+
+            # The quote currency has to match the wallet. A CAD bot cannot settle
+            # a BTC/USD trade, and quietly accepting one would leave the operator
+            # holding a position in a currency they never chose.
+            if quote not in allowed_quotes:
+                return (
+                    "%s is priced in %s, but this bot trades in %s. Only %s pairs "
+                    "can be used, because that is the currency your balance is in."
+                    % (cleaned, quote, " or ".join(allowed_quotes), "/".join(allowed_quotes))
+                )
+
+            # Leveraged tokens reset daily and decay; a beginner holding one can
+            # lose most of their money without the price of the underlying moving
+            # against them at all.
+            if LEVERAGED_TOKEN_PATTERN.search(base):
+                return (
+                    "%s looks like a leveraged token. Those move several times "
+                    "faster than the coin they track, reset daily, and can lose "
+                    "most of their value even when the coin itself is flat. This "
+                    "bot does not trade them." % cleaned
+                )
+
+        return None
+
     async def _handle_restrict_pairs(self, change: Dict[str, Any]) -> Dict[str, Any]:
         """
         Restrict trading to a set of pairs.
@@ -1770,6 +1853,16 @@ Examples:
                     "trading to. Nothing was changed."
                 ),
             }
+
+        # Checked again here, and not only in the validator, because this is the
+        # call that reaches the exchange. The validator guards the proposal; this
+        # guards the money, and it has to hold even if a change arrives by a path
+        # that skipped validation.
+        problem = self._check_pair_list(pairs)
+        if problem is not None:
+            self.logger.warning("Refused a pair list at the exchange call: %s", problem)
+            return {"change": change, "status": "refused", "error": problem}
+
         try:
             result = await self.freqtrade.set_whitelist(pairs)
             return {"change": change, "status": "success", "result": result}

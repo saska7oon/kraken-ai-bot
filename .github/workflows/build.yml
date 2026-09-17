@@ -79,6 +79,12 @@ jobs:
       - name: Operator settings and dry-run reset
         run: python3 ai_orchestrator/tests/test_settings.py
 
+      - name: Pair-list safety rules
+        run: python3 ai_orchestrator/tests/test_pair_safety.py
+
+      - name: Strategy naming
+        run: python3 ai_orchestrator/tests/test_strategy_naming.py
+
       - name: Configuration preflight
         run: python3 tools/preflight_config.py
 
@@ -95,6 +101,14 @@ jobs:
       - name: Validate config against Freqtrade's real schema
         run: |
           python3 tools/validate_against_schema.py --freqtrade-src /tmp/ftsrc
+
+      # Nothing in our own suite can tell whether /api/v1/locks/{id} is a real
+      # route or takes DELETE. A wrong one is not a crash - it is a 404 that our
+      # client turns into "could not reach the bot", which for an operator who
+      # cannot read the logs looks identical to a feature that is simply idle.
+      - name: Check every Freqtrade API call against the real routes
+        run: |
+          python3 tools/audit_api_routes.py --freqtrade-src /tmp/ftsrc
 
   build-orchestrator:
     name: Build AI Orchestrator

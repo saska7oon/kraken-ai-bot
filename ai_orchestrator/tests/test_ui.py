@@ -78,7 +78,37 @@ def _routes_in_main() -> Set[str]:
     return routes
 
 
-def _keys_returned_by(path: str) -> Set[str]:
+def _module_function_keys(name: str) -> Set[str]:
+    """Keys returned by a function of this name in any known core/plugin module.
+
+    Used for a name that is imported directly into main.py rather than reached as
+    ``module.func(...)`` - ``describe_strategy`` is imported that way. Matching by
+    name across the known modules is enough here because the modules are ours and
+    the names are distinct; if two ever collide, the union is a superset and the
+    check errs towards not reporting a false failure.
+    """
+    found: Set[str] = set()
+    for source in _CORE_MODULES.values():
+        if not source.exists():
+            continue
+        try:
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name != name:
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Dict):
+                    for k in sub.keys:
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                            found.add(k.value)
+    return found
+
+
+def _keys_returned_by(path: str, method: str = "GET") -> Set[str]:
     """Field names a route's handler returns.
 
     Collected from the handler's dict literals *and* from
@@ -89,21 +119,34 @@ def _keys_returned_by(path: str) -> Set[str]:
     """
     tree = ast.parse(_read(MAIN_PY))
 
+    # The method matters. /api/v1/settings and /api/v1/settings/reset-dryrun each
+    # have a GET that previews and a POST that acts, and the two return different
+    # shapes. Matching on the path alone picked whichever handler came last, so
+    # the GET's fields were checked against the POST's and every one of them was
+    # reported missing.
     handler = None
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for dec in node.decorator_list:
-            if (
-                isinstance(dec, ast.Call)
-                and isinstance(dec.func, ast.Attribute)
-                and dec.args
-                and isinstance(dec.args[0], ast.Constant)
-                and dec.args[0].value == path
-            ):
+            if not (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)):
+                continue
+            if not dec.args or not isinstance(dec.args[0], ast.Constant):
+                continue
+            if dec.args[0].value != path:
+                continue
+            if dec.func.attr.upper() == method.upper():
                 handler = node
     if handler is None:
         return set()
+
+    # Bound before keys_in is defined or called: keys_in closes over it, and a
+    # free variable that is not yet assigned raises NameError at call time.
+    helpers = {
+        n.name: n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not _is_route(n)
+    }
 
     def keys_in(node) -> Set[str]:
         found: Set[str] = set()
@@ -112,6 +155,22 @@ def _keys_returned_by(path: str) -> Set[str]:
                 for k in sub.keys:
                     if isinstance(k, ast.Constant) and isinstance(k.value, str):
                         found.add(k.value)
+                    elif k is None:
+                        # `**something` - the dict is built partly from another
+                        # call's result. /api/v1/status does this with
+                        # describe_strategy(), so without following it the two
+                        # fields the UI reads from that spread looked missing.
+                        spread = [
+                            v
+                            for v in sub.values
+                            if isinstance(v, ast.Call) and isinstance(v.func, ast.Name)
+                        ]
+                        for call in spread:
+                            helper = helpers.get(call.func.id)
+                            if helper is not None:
+                                found |= keys_in(helper)
+                            else:
+                                found |= _module_function_keys(call.func.id)
             # response["key"] = ...
             elif isinstance(sub, ast.Assign) and isinstance(sub.targets[0], ast.Subscript):
                 sl = sub.targets[0].slice
@@ -130,12 +189,6 @@ def _keys_returned_by(path: str) -> Set[str]:
     #   1. local helpers in main.py that the handler calls
     #   2. functions in core modules whose result the handler returns directly
     #      (the dry-run reset returns the report built in dryrun_reset.reset)
-    helpers = {
-        n.name: n
-        for n in ast.walk(tree)
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not _is_route(n)
-    }
-
     called = {
         n.func.id
         for n in ast.walk(handler)
@@ -170,21 +223,31 @@ def _keys_returned_by(path: str) -> Set[str]:
         # x = await module.func(...)  where x is later returned
         elif isinstance(sub, ast.Assign) and len(sub.targets) == 1:
             target = sub.targets[0]
-            if (
-                isinstance(target, ast.Name)
-                and target.id in returned_names
-                and isinstance(sub.value, ast.Await)
-            ):
+            if isinstance(target, ast.Name) and target.id in returned_names:
+                # `x = await mod.fn(...)` and `x = mod.fn(...)` both occur. The
+                # second is easy to forget: settings_store.describe() is
+                # synchronous, so requiring an Await skipped it and made
+                # GET /api/v1/settings look like it returned only the handful of
+                # keys written by hand in the handler - every field the settings
+                # panel actually renders was then reported missing.
                 candidates.extend(c for c in ast.walk(sub.value) if isinstance(c, ast.Call))
 
     for call in candidates:
         if not isinstance(call.func, ast.Attribute):
             continue
         module = getattr(call.func.value, "id", None)
-        if not module:
-            continue
-        source = _CORE_MODULES.get(module)
-        if not source or not source.exists():
+        source = _CORE_MODULES.get(module) if module else None
+        if source is None or not source.exists():
+            # The receiver is not a module name. `plugin.build_digest()` is the
+            # case that matters: `plugin` is a local variable holding whichever
+            # plugin the route asked for, so there is nothing to look up by
+            # receiver. Falling back to the METHOD name finds it, and the method
+            # names across our plugins are distinct enough for that to be exact.
+            #
+            # Without this, /api/v1/explain/digest resolved to no keys at all and
+            # the check silently skipped it - which is how a UI reading two field
+            # names that endpoint has never returned went unnoticed.
+            keys |= _module_function_keys(call.func.attr)
             continue
         try:
             module_tree = ast.parse(source.read_text(encoding="utf-8"))
@@ -214,6 +277,14 @@ def _is_route(node) -> bool:
 _CORE_MODULES = {
     "dryrun_reset": pathlib.Path(__file__).resolve().parents[1] / "core" / "dryrun_reset.py",
     "settings_store": pathlib.Path(__file__).resolve().parents[1] / "core" / "settings_store.py",
+    "strategy_inspector": pathlib.Path(__file__).resolve().parents[1] / "core" / "strategy_inspector.py",
+    # Plugins count too. A route whose payload comes from a plugin method -
+    # /api/v1/explain/digest returns explainer.build_digest() - resolved to NO
+    # keys at all, so the check skipped it entirely. That is where a real bug was
+    # hiding: the UI read two field names that endpoint has never returned, and
+    # the panel therefore always claimed the AI had written text the bot had
+    # computed itself.
+    "explainer": pathlib.Path(__file__).resolve().parents[1] / "plugins" / "explainer.py",
 }
 
 
@@ -229,8 +300,8 @@ _NOT_RESPONSE_FIELDS = {
 }
 
 
-def _ui_field_bindings(script: str) -> List[Tuple[str, str, int]]:
-    """(variable, api_path, line) for each ``const X = await api("...")``.
+def _ui_field_bindings(script: str) -> List[Tuple[str, str, int, str]]:
+    """(variable, api_path, line, method) for each response bound to a route.
 
     Ties a response variable to the route that produced it, so fields can be
     checked against the right handler. Guessing by variable name alone is what
@@ -238,12 +309,39 @@ def _ui_field_bindings(script: str) -> List[Tuple[str, str, int]]:
     for both the status and the safety response, and ``p`` for both a proposal
     and a protection.
     """
-    out: List[Tuple[str, str, int]] = []
+    out: List[Tuple[str, str, int, str]] = []
     pattern = re.compile(
-        r"""(?:const|let|var)\s+(\w+)\s*=\s*await\s+api\(\s*["'](/api/[^"'`\s]*)["']"""
+        r"""(?:const|let|var)\s+(\w+)\s*=\s*await\s+api\(\s*["'](/api/[^"'`\s]*)["']([^)]*)"""
     )
     for m in pattern.finditer(script):
-        out.append((m.group(1), m.group(2), script[: m.start()].count("\n") + 1))
+        method = "POST" if "POST" in m.group(3).upper() else "GET"
+        out.append((m.group(1), m.group(2), script[: m.start()].count("\n") + 1, method))
+
+    # A declaration with no initialiser, assigned later inside a try:
+    #
+    #     let s;
+    #     try { s = await api("/api/v1/status"); }
+    #     catch (e) { if (e.auth) return signOut(e.message); }
+    #
+    # That is how every handler that has to distinguish an auth failure is
+    # written, and it includes loadStatus() - the single most important handler
+    # in the UI. Without this it was never checked at all: a field-name typo
+    # there would show the operator em-dashes and pass this suite.
+    #
+    # Only names declared WITHOUT a value are collected, so a plain reassignment
+    # cannot rebind an already-bound variable to a second route.
+    declared = set(re.findall(r"""(?:let|var)\s+(\w+)\s*;""", script))
+    if declared:
+        assign = re.compile(
+            r"""\b(\w+)\s*=\s*await\s+api\(\s*["'](/api/[^"'`\s]*)["']([^)]*)"""
+        )
+        already = {name for name, _, _, _ in out}
+        for m in assign.finditer(script):
+            name = m.group(1)
+            if name in declared and name not in already:
+                method = "POST" if "POST" in m.group(3).upper() else "GET"
+                out.append((name, m.group(2), script[: m.start()].count("\n") + 1, method))
+                already.add(name)
     return out
 
 
@@ -277,6 +375,35 @@ def _fields_read(script: str, var: str) -> Set[str]:
     """Response fields read off a variable: ``X.field``."""
     names = set(re.findall(r"\b%s\.([A-Za-z_]\w*)" % re.escape(var), script))
     return {n for n in names if n not in _NOT_RESPONSE_FIELDS}
+
+
+def _field_chains(script: str, var: str) -> List[Set[str]]:
+    """Groups of fields read as fallbacks: ``d.a || d.b || d.c``.
+
+    A chain is its own requirement, and the requirement is that AT LEAST ONE of
+    its members exists. Requiring all of them is wrong - the code is written to
+    cope with whichever shape the response has, and every member but the one in
+    use would be reported as a missing field. Requiring none of them is also
+    wrong, and worse: it is the shape that hides a real bug, because a chain
+    where nothing matches silently yields "" and the panel shows an empty box.
+
+    So the chain is checked as a unit rather than dissolved into its parts.
+    """
+    chains: List[Set[str]] = []
+    pattern = re.compile(
+        r"\b%s(?:\.[A-Za-z_]\w*)(?:\s*\|\|\s*%s\.[A-Za-z_]\w*)+"
+        % (re.escape(var), re.escape(var))
+    )
+    for match in pattern.finditer(script):
+        members = set()
+        for part in match.group(0).split("||"):
+            part = part.strip()
+            if "." in part:
+                members.add(part.split(".", 1)[1].strip())
+        members -= _NOT_RESPONSE_FIELDS
+        if members:
+            chains.append(members)
+    return chains
 
 
 def _paths_called_by_ui(script: str) -> List[Tuple[str, int]]:
@@ -466,25 +593,35 @@ def main() -> int:
     checked = 0
     for fname, body in _js_functions(code):
         bindings = _ui_field_bindings(body)
-        for var, path, line in bindings:
+        for var, path, line, method in bindings:
             real_path = path.split("?")[0].rstrip("/") or "/"
             # Routes with a path parameter have no statically known shape.
             if any("{" in r and _endpoint_ok(real_path, {r}) for r in routes):
                 continue
-            known = _keys_returned_by(real_path)
+            known = _keys_returned_by(real_path, method)
             if not known:
                 continue
-            read = _fields_read(body, var)
+            # A field inside a || chain is checked as a chain, not individually.
+            chains = _field_chains(body, var)
+            chained = set().union(*chains) if chains else set()
+            read = _fields_read(body, var) - chained
             missing = sorted(f for f in read if f not in known)
+
+            # Each chain needs at least one member present, or it evaluates to
+            # undefined and the panel silently renders nothing.
+            broken_chains = [sorted(c) for c in chains if not (c & known)]
+            missing += [" or ".join(c) for c in broken_chains]
+
             checked += 1
             if missing:
                 failures.append(
-                    f"{fname}() reads {var}.{missing} from {real_path}, "
+                    f"{fname}() reads {var}.{missing} from {method} {real_path}, "
                     f"but that handler returns {sorted(known)}"
                 )
-                print(f"  FAIL  {fname}() {real_path}: reads {missing}, not returned")
+                print(f"  FAIL  {fname}() {method} {real_path}: reads {missing}, not returned")
             else:
-                print(f"  ok    {fname}() {real_path}  ({len(read)} field(s), all present)")
+                note = " (+%d fallback chain(s))" % len(chains) if chains else ""
+                print(f"  ok    {fname}() {method} {real_path}  ({len(read)} field(s), all present{note})")
     if checked == 0:
         failures.append("no response bindings could be checked")
         print("  FAIL  nothing checked")
