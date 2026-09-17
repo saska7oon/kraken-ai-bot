@@ -34,11 +34,13 @@ import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -402,6 +404,58 @@ async def health_check():
     Returns no configuration, plugin or credential information.
     """
     return PublicHealth(status="ok", timestamp=datetime.now(timezone.utc).isoformat())
+
+
+# ---------------------------------------------------------------------------
+# Operator UI
+# ---------------------------------------------------------------------------
+#: Location of the single-page UI, shipped inside the package so the existing
+#: `COPY ai_orchestrator/ /app/ai_orchestrator/` in the Dockerfile picks it up.
+UI_DIR = Path(__file__).resolve().parent / "ui"
+UI_FILE = UI_DIR / "index.html"
+
+
+def _render_ui() -> str:
+    """Read the UI page from disk, or return an explanatory placeholder.
+
+    Read per request rather than cached at import: the file is a few tens of
+    kilobytes and reading it keeps a UI fix deployable without a rebuild. A
+    missing file must not take the service down - this route is a convenience,
+    and the API it fronts is the actual product - so failure is reported as a
+    readable page rather than a 500.
+    """
+    try:
+        return UI_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.error("UI page missing at %s", UI_FILE)
+        return (
+            "<!doctype html><html><body style=\"font-family:system-ui;"
+            "background:#05070d;color:#e8ecf6;padding:40px\">"
+            "<h1>Operator UI not found</h1>"
+            "<p>The page should be at <code>" + str(UI_FILE) + "</code>. "
+            "The REST API is unaffected and still available under "
+            "<code>/api/v1/</code>.</p></body></html>"
+        )
+
+
+@app.get("/", response_class=HTMLResponse)
+@app.get("/ui", response_class=HTMLResponse)
+async def operator_ui():
+    """Serve the operator UI.
+
+    Deliberately **unauthenticated**, and deliberately harmless: the response is
+    a static page containing no configuration, no credentials and no data. The
+    bearer token is entered by the operator in the browser and kept in that
+    browser's storage; the page never receives it from the server. Every API
+    call the page makes is authenticated exactly as any other client's would be,
+    so serving this HTML grants no access that a `curl` user does not already
+    have.
+
+    Requiring a token to fetch the page would not add security - it would only
+    mean the operator has to paste the token into a prompt to receive a page
+    that then asks them to paste the token.
+    """
+    return HTMLResponse(content=_render_ui())
 
 
 @app.get("/api/v1/health/detail")

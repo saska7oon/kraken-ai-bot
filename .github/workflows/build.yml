@@ -67,6 +67,9 @@ jobs:
       - name: Plugin scheduler (cron parsing)
         run: python3 ai_orchestrator/tests/test_plugin_scheduler.py
 
+      - name: Operator UI (injection safety, endpoints, fields)
+        run: python3 ai_orchestrator/tests/test_ui.py
+
       - name: Configuration preflight
         run: python3 tools/preflight_config.py
 

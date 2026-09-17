@@ -122,24 +122,71 @@ docker run --rm -it --network kraken-bot-network curlimages/curl \
   http://ai_orchestrator:8082/health
 ```
 
-### 6. Access Web UI
-Open http://localhost:8081 (FreqUI, served by the freqtrade container)
-- Username: `freqtrade`
-- Password: (from the `freqtrade_api_password` Swarm secret)
+### 6. Open the bot
 
----
+Browse to:
+
+```
+http://<pi-ip>:8082
+```
+
+That is the operator UI — the page you actually use. It shows what the bot is
+doing, explains it in plain language, and lets you talk to it. On first visit it
+asks for your access token (the `orchestrator_api_token` secret); paste it once
+and the browser remembers it.
+
+Everything on that page comes from the same REST API documented below, so you can
+still use `curl` if you prefer.
+
+## 🖥 The operator UI
+
+`http://<pi-ip>:8082` is a single page that shows what the bot is doing and lets
+you talk to it. It is the intended way to use this bot; the REST API below is the
+same thing for scripting.
+
+| Area | What it shows |
+|------|---------------|
+| **Header** | Whether you are in dry run or trading real money, and whether the bot is running |
+| **Stat cards** | Balance, total profit, open trades vs. allowed, active strategy |
+| **What's going on** | The plain-language summary. Works with no AI at all — it is computed in Python |
+| **Ask the bot** | Type a question or a command. Approve/Decline buttons appear when something needs you |
+| **Recent trades** | Each trade with *why it closed*, in plain words ("hit the stop loss — the safety limit that caps a loss") |
+| **Waiting for you** | Anything needing approval, with the exact values and an expiry countdown |
+| **Safety net** | Whether the circuit breakers are armed |
+| **Controls** | Pause, resume, generate a strategy, run a market check |
+
+### Things worth knowing about it
+
+- **Your token stays in your browser.** You paste it once; the page never sends it
+  anywhere but this service, and it is never written into the page source.
+- **It adds no new powers.** Every button calls an endpoint that already existed.
+  The page cannot change your configuration, cannot go live, and cannot bypass
+  approval — there is no code path for any of those.
+- **It works offline.** No CDN, no external fonts, no icon packs, no frameworks.
+  If the Pi has no internet, the page still renders.
+- **The AI's words are treated as text, never as code.** The summary is
+  model-written, so it is inserted as plain text. A confused model cannot inject
+  anything into your browser.
+- **It is not FreqUI.** Freqtrade's own UI is still there at
+  `http://<pi-ip>:8081` if you want it later, but nothing links to it and nothing
+  depends on it. Note that FreqUI exposes a force-exit button — the one action
+  this orchestrator deliberately cannot perform — so treat it as an advanced tool.
 
 ## 💬 Natural Language Control
 
+You can talk to the bot from the UI at `http://<pi-ip>:8082`, which is the
+intended way. This section documents the same thing over HTTP, for scripting and
+for anyone who prefers a terminal.
+
 All routes require the bearer token from the `orchestrator_api_token` Swarm
-secret, and the orchestrator port is not published to the host. See
-[SECRETS.md](SECRETS.md#orchestrator-api-authentication) for how to reach it.
+secret. The port is published on the host, so no tunnel is needed on a local
+network; see [SECRETS.md](SECRETS.md#orchestrator-api-authentication) for the
+token, and the comment on the `ai-orchestrator` service in
+`portainer-stack.yml` for the exposure tradeoff.
 
 ```bash
 export ORCHESTRATOR_TOKEN=...   # your orchestrator_api_token secret
-# Assumes an SSH tunnel:  ssh -L 8082:localhost:8082 <user>@<pi-host>
-# The orchestrator port is not published on the host by design.
-export API=http://localhost:8082
+export API=http://<pi-ip>:8082
 
 # Check status
 curl -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" $API/api/v1/status
@@ -296,7 +343,11 @@ curl -X POST http://localhost:8082/api/v1/plugins/strategy_generator/control \
 - ✅ **AI Orchestrator NEVER sees Kraken keys** - only talks to Freqtrade REST API
 - ✅ **All secrets mounted as files at `/run/secrets/`**
 - ✅ **Orchestrator API requires a bearer token; fails closed if unconfigured**
-- ✅ **Orchestrator port is not published to the host**
+- ✅ **The orchestrator holds no Kraken keys and cannot write trading config**
+- ⚠️ **The orchestrator port IS published** (`8082`) so the UI is reachable —
+  the approval endpoint it once exposed is now token-gated and bound to a
+  single-use, expiring, server-issued proposal id. See the comment on the
+  `ai-orchestrator` service in `portainer-stack.yml` for the tradeoff.
 - ✅ **Audit log tracks every AI action with hash chaining**
 - ✅ **Human approval required for all config changes**
 - ✅ **Switching to live trading cannot be done through the API** - it requires

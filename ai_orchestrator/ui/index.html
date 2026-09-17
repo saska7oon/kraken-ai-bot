@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Kraken AI Bot</title>
+<!--
+  Single-page operator UI for the AI orchestrator.
+  ================================================
+
+  Served by the orchestrator itself, from the same origin as the API, so there
+  is no CORS surface and nothing to configure. It holds no secrets: the
+  operator's bearer token is entered once and kept in this browser's
+  localStorage, never in the page source and never sent anywhere but this
+  service.
+
+  Deliberately self-contained: no CDN, no fonts, no icon packs, no frameworks.
+  The Pi may have no route to the internet, and a UI that renders as unstyled
+  text when it does not is worse than no UI. System font stacks only.
+
+  Safety properties, both load-bearing:
+    1. Every API-supplied string reaches the DOM through textContent, never
+       innerHTML. The digest is model-generated prose; if it were interpolated
+       as markup, a confused or hostile model could inject script into the
+       operator's browser. Text is text.
+    2. This page can only call endpoints that already existed. It adds no
+       capability: no config writes, no way to bypass approval, nothing that
+       touches the trading path. It is a display layer over the existing API.
+-->
+<style>
+:root{
+  --bg:#05070d;
+  --bg-2:#080b14;
+  --panel:rgba(255,255,255,.032);
+  --panel-hi:rgba(255,255,255,.055);
+  --line:rgba(255,255,255,.085);
+  --line-hi:rgba(255,255,255,.16);
+  --text:#e8ecf6;
+  --text-2:#9aa6bf;
+  --text-3:#5f6b85;
+  --cyan:#22d3ee;
+  --violet:#a78bfa;
+  --up:#34d399;
+  --down:#fb7185;
+  --warn:#fbbf24;
+  --r:16px;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--sans);
+  font-size:15px;
+  line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+/* Ambient glow. Two soft radial washes, fixed, behind everything. */
+body::before{
+  content:"";position:fixed;inset:0;z-index:-2;
+  background:
+    radial-gradient(900px 600px at 12% -8%, rgba(34,211,238,.10), transparent 60%),
+    radial-gradient(800px 600px at 88% 4%, rgba(167,139,250,.11), transparent 62%),
+    radial-gradient(700px 500px at 50% 110%, rgba(34,211,238,.05), transparent 60%),
+    linear-gradient(180deg,var(--bg) 0%,var(--bg-2) 100%);
+}
+/* Faint grid, to read as "instrument panel" rather than "web page". */
+body::after{
+  content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background-image:
+    linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px);
+  background-size:52px 52px;
+  mask-image:radial-gradient(circle at 50% 0%,#000 0%,transparent 78%);
+  -webkit-mask-image:radial-gradient(circle at 50% 0%,#000 0%,transparent 78%);
+}
+.wrap{max-width:1280px;margin:0 auto;padding:22px 20px 64px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ---------- connect screen ---------- */
+#connect{
+  min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
+}
+.connect-card{
+  width:100%;max-width:430px;
+  background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.02));
+  border:1px solid var(--line-hi);border-radius:22px;padding:34px 30px;
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  box-shadow:0 30px 80px -20px rgba(0,0,0,.8),0 0 0 1px rgba(255,255,255,.03) inset;
+}
+.connect-card h1{font-size:23px;font-weight:650;letter-spacing:-.02em;margin-bottom:6px}
+.connect-card .sub{color:var(--text-2);font-size:13.5px;margin-bottom:26px}
+.connect-card label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--text-3);margin-bottom:8px;font-weight:600}
+input[type=password],input[type=text]{
+  width:100%;background:rgba(0,0,0,.4);border:1px solid var(--line-hi);
+  border-radius:11px;padding:12px 14px;color:var(--text);font-family:var(--mono);
+  font-size:13.5px;outline:none;transition:border-color .18s,box-shadow .18s;
+}
+input:focus{border-color:rgba(34,211,238,.55);box-shadow:0 0 0 3px rgba(34,211,238,.13)}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  border:1px solid var(--line-hi);background:var(--panel-hi);color:var(--text);
+  border-radius:11px;padding:11px 18px;font-size:14px;font-weight:560;
+  cursor:pointer;font-family:inherit;transition:all .16s;white-space:nowrap;
+}
+.btn:hover{background:rgba(255,255,255,.1);border-color:var(--line-hi)}
+.btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.btn-primary{
+  background:linear-gradient(135deg,var(--cyan),var(--violet));
+  border:none;color:#04060c;font-weight:680;
+  box-shadow:0 6px 22px -6px rgba(34,211,238,.5);
+}
+.btn-primary:hover{filter:brightness(1.08)}
+.btn-danger{border-color:rgba(251,113,133,.35);color:var(--down)}
+.btn-danger:hover{background:rgba(251,113,133,.12)}
+.btn-sm{padding:7px 13px;font-size:12.5px;border-radius:9px}
+.btn-block{width:100%;margin-top:18px}
+.hint{font-size:12px;color:var(--text-3);margin-top:16px;line-height:1.6}
+.hint code{font-family:var(--mono);background:rgba(255,255,255,.07);padding:2px 6px;border-radius:5px;font-size:11.5px}
+.err{color:var(--down);font-size:13px;margin-top:14px;min-height:19px}
+
+/* ---------- header ---------- */
+header{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:16px 20px;margin-bottom:20px;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+}
+.brand{display:flex;align-items:center;gap:11px;font-weight:660;letter-spacing:-.015em;font-size:16px}
+.dot{
+  width:9px;height:9px;border-radius:50%;background:var(--cyan);flex:none;
+  box-shadow:0 0 12px var(--cyan);animation:pulse 2.6s ease-in-out infinite;
+}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.86)}}
+.pill{
+  display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;
+  font-size:11.5px;font-weight:680;letter-spacing:.07em;text-transform:uppercase;
+  border:1px solid;font-family:var(--mono);
+}
+.pill-dry{color:var(--warn);border-color:rgba(251,191,36,.32);background:rgba(251,191,36,.09)}
+.pill-live{color:var(--down);border-color:rgba(251,113,133,.4);background:rgba(251,113,133,.11)}
+.pill-ok{color:var(--up);border-color:rgba(52,211,153,.3);background:rgba(52,211,153,.08)}
+.pill-off{color:var(--text-3);border-color:var(--line);background:rgba(255,255,255,.03)}
+.spacer{flex:1}
+.updated{font-size:11.5px;color:var(--text-3);font-family:var(--mono)}
+
+/* ---------- stat grid ---------- */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:20px}
+.stat{
+  position:relative;overflow:hidden;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:18px 20px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+}
+.stat::before{
+  content:"";position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(34,211,238,.5),transparent);
+  opacity:.65;
+}
+.stat .k{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--text-3);font-weight:640;margin-bottom:9px}
+.stat .v{font-size:27px;font-weight:660;letter-spacing:-.025em;font-family:var(--mono);line-height:1.15}
+.stat .d{font-size:12px;color:var(--text-2);margin-top:5px}
+.up{color:var(--up)}.down{color:var(--down)}.muted{color:var(--text-3)}
+
+/* ---------- layout ---------- */
+.grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:18px;align-items:start}
+@media(max-width:940px){.grid{grid-template-columns:1fr}}
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:20px;margin-bottom:18px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+}
+.card h2{
+  font-size:12px;text-transform:uppercase;letter-spacing:.11em;color:var(--text-3);
+  font-weight:680;margin-bottom:15px;display:flex;align-items:center;gap:9px;
+}
+.card h2 .spacer{flex:1}
+
+/* ---------- digest ---------- */
+.digest{
+  font-size:15px;line-height:1.72;color:#dbe3f2;white-space:pre-wrap;word-break:break-word;
+}
+.digest strong{color:var(--text);font-weight:640}
+.digest-src{
+  margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--text-3);display:flex;align-items:center;gap:7px;
+}
+
+/* ---------- chat ---------- */
+#chat-log{display:flex;flex-direction:column;gap:12px;max-height:460px;overflow-y:auto;padding-right:4px;margin-bottom:14px}
+#chat-log::-webkit-scrollbar{width:7px}
+#chat-log::-webkit-scrollbar-thumb{background:rgba(255,255,255,.13);border-radius:4px}
+.msg{max-width:88%;padding:12px 15px;border-radius:14px;font-size:14.2px;line-height:1.6;white-space:pre-wrap;word-break:break-word;animation:rise .26s ease-out}
+@keyframes rise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+.msg-user{align-self:flex-end;background:linear-gradient(135deg,rgba(34,211,238,.19),rgba(167,139,250,.19));border:1px solid rgba(34,211,238,.28)}
+.msg-bot{align-self:flex-start;background:rgba(255,255,255,.045);border:1px solid var(--line)}
+.msg-sys{align-self:center;background:transparent;border:1px dashed var(--line);color:var(--text-3);font-size:12.5px;text-align:center;max-width:100%}
+.msg-err{align-self:flex-start;background:rgba(251,113,133,.1);border:1px solid rgba(251,113,133,.3);color:#ffd7dd}
+.typing{display:flex;gap:4px;align-self:flex-start;padding:13px 16px;background:rgba(255,255,255,.045);border:1px solid var(--line);border-radius:14px}
+.typing i{width:6px;height:6px;border-radius:50%;background:var(--text-3);animation:blink 1.3s infinite}
+.typing i:nth-child(2){animation-delay:.18s}
+.typing i:nth-child(3){animation-delay:.36s}
+@keyframes blink{0%,60%,100%{opacity:.28;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
+.chat-input{display:flex;gap:10px}
+.chat-input input{flex:1}
+.suggestions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:13px}
+.chip{
+  background:rgba(255,255,255,.045);border:1px solid var(--line);color:var(--text-2);
+  border-radius:999px;padding:6px 13px;font-size:12.5px;cursor:pointer;
+  font-family:inherit;transition:all .15s;
+}
+.chip:hover{background:rgba(34,211,238,.12);border-color:rgba(34,211,238,.35);color:var(--text)}
+
+/* ---------- proposals ---------- */
+.prop{
+  border:1px solid rgba(251,191,36,.28);background:rgba(251,191,36,.055);
+  border-radius:13px;padding:15px;margin-bottom:11px;
+}
+.prop-head{display:flex;align-items:center;gap:9px;margin-bottom:9px;font-size:13.5px;font-weight:620}
+.prop-body{font-size:13.2px;color:var(--text-2);white-space:pre-wrap;word-break:break-word;margin-bottom:12px}
+.prop-meta{font-size:11.5px;color:var(--text-3);font-family:var(--mono);margin-bottom:11px}
+.prop-actions{display:flex;gap:9px;flex-wrap:wrap}
+.changes{list-style:none;font-family:var(--mono);font-size:12.5px;margin-bottom:12px}
+.changes li{padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);color:var(--text-2)}
+.changes li:last-child{border-bottom:none}
+
+/* ---------- trades ---------- */
+.trade{display:flex;align-items:flex-start;gap:12px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:13.5px}
+.trade:last-child{border-bottom:none}
+.trade-pair{font-weight:640;font-family:var(--mono);font-size:13px;min-width:88px}
+.trade-why{color:var(--text-2);flex:1;font-size:13px;line-height:1.5}
+.trade-pl{font-family:var(--mono);font-weight:640;font-size:13.2px;text-align:right;white-space:nowrap}
+
+/* ---------- safety ---------- */
+.safe-row{display:flex;align-items:center;gap:10px;padding:9px 0;font-size:13.5px;border-bottom:1px solid rgba(255,255,255,.05)}
+.safe-row:last-child{border-bottom:none}
+.safe-ico{width:19px;text-align:center;flex:none;font-size:14px}
+.safe-name{font-family:var(--mono);font-size:12.5px;flex:1}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;font-size:13.2px;border-bottom:1px solid rgba(255,255,255,.05)}
+.kv:last-child{border-bottom:none}
+.kv .kk{color:var(--text-3)}
+.kv .vv{font-family:var(--mono);text-align:right;word-break:break-word}
+
+.empty{color:var(--text-3);font-size:13.2px;padding:12px 0;text-align:center}
+.skel{height:15px;border-radius:6px;background:linear-gradient(90deg,rgba(255,255,255,.05),rgba(255,255,255,.1),rgba(255,255,255,.05));background-size:200% 100%;animation:shim 1.4s infinite;margin-bottom:8px}
+@keyframes shim{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.toast{
+  position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(80px);
+  background:rgba(12,16,26,.97);border:1px solid var(--line-hi);border-radius:12px;
+  padding:12px 20px;font-size:13.5px;z-index:99;opacity:0;transition:all .28s;
+  backdrop-filter:blur(16px);max-width:90vw;box-shadow:0 18px 50px -12px rgba(0,0,0,.8);
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.ok{border-color:rgba(52,211,153,.4)}
+.toast.bad{border-color:rgba(251,113,133,.45)}
+.hidden{display:none!important}
+a.link{color:var(--cyan);text-decoration:none}
+a.link:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+
+<!-- ===================== connect ===================== -->
+<div id="connect">
+  <div class="connect-card">
+    <h1>Kraken AI Bot</h1>
+    <p class="sub">Enter your access token to continue.</p>
+    <label for="tok">Access token</label>
+    <input id="tok" type="password" placeholder="paste your token" autocomplete="current-password" spellcheck="false">
+    <button class="btn btn-primary btn-block" id="connect-btn">Connect</button>
+    <div class="err" id="connect-err"></div>
+    <p class="hint">
+      This is the value of the <code>orchestrator_api_token</code> secret. It is
+      stored only in this browser and sent only to this service &mdash; never to
+      any AI provider.
+    </p>
+  </div>
+</div>
+
+<!-- ===================== app ===================== -->
+<div id="app" class="wrap hidden">
+
+  <header>
+    <span class="brand"><span class="dot"></span> Kraken AI Bot</span>
+    <span class="pill pill-off" id="mode-pill">&mdash;</span>
+    <span class="pill pill-off" id="state-pill">&mdash;</span>
+    <span class="spacer"></span>
+    <span class="updated" id="updated"></span>
+    <button class="btn btn-sm" id="refresh-btn">Refresh</button>
+    <button class="btn btn-sm" id="forget-btn">Sign out</button>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="k">Balance</div><div class="v mono" id="s-balance">&mdash;</div><div class="d" id="s-balance-d"></div></div>
+    <div class="stat"><div class="k">Profit</div><div class="v mono" id="s-profit">&mdash;</div><div class="d" id="s-profit-d"></div></div>
+    <div class="stat"><div class="k">Open trades</div><div class="v mono" id="s-open">&mdash;</div><div class="d" id="s-open-d"></div></div>
+    <div class="stat"><div class="k">Strategy</div><div class="v mono" id="s-strategy" style="font-size:17px">&mdash;</div><div class="d" id="s-strategy-d"></div></div>
+  </div>
+
+  <div class="grid">
+    <!-- ============ left column ============ -->
+    <div>
+      <div class="card">
+        <h2>What's going on<span class="spacer"></span><button class="btn btn-sm" id="digest-btn">Explain</button></h2>
+        <div class="digest" id="digest"><div class="skel"></div><div class="skel" style="width:82%"></div><div class="skel" style="width:64%"></div></div>
+        <div class="digest-src" id="digest-src"></div>
+      </div>
+
+      <div class="card">
+        <h2>Ask the bot</h2>
+        <div id="chat-log"></div>
+        <div class="suggestions" id="suggestions">
+          <button class="chip">show my status</button>
+          <button class="chip">how am I doing?</button>
+          <button class="chip">pause trading</button>
+          <button class="chip">make it more conservative</button>
+          <button class="chip">what are the market conditions?</button>
+        </div>
+        <div class="chat-input">
+          <input id="chat-in" type="text" placeholder="Type a question or a command&hellip;" autocomplete="off">
+          <button class="btn btn-primary" id="send-btn">Send</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Recent trades</h2>
+        <div id="trades"><div class="skel"></div><div class="skel" style="width:70%"></div></div>
+      </div>
+    </div>
+
+    <!-- ============ right column ============ -->
+    <div>
+      <div class="card" id="approvals-card">
+        <h2>Waiting for you</h2>
+        <div id="approvals"><div class="empty">Nothing needs your approval.</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Safety net</h2>
+        <div id="safety"><div class="skel"></div><div class="skel" style="width:66%"></div></div>
+      </div>
+
+      <div class="card">
+        <h2>Controls</h2>
+        <div style="display:flex;gap:9px;flex-wrap:wrap">
+          <button class="btn btn-sm" id="pause-btn">Pause trading</button>
+          <button class="btn btn-sm" id="resume-btn">Resume trading</button>
+          <button class="btn btn-sm" id="gen-btn">Generate a strategy</button>
+          <button class="btn btn-sm" id="analysis-btn">Market check</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Bot details</h2>
+        <div id="details"><div class="skel"></div><div class="skel" style="width:58%"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+/* ==========================================================================
+   Kraken AI Bot - operator UI
+   Every API string is written with textContent. See the header comment.
+   ========================================================================== */
+
+const TOKEN_KEY = "kraken_ai_bot_token";
+let TOKEN = "";
+let busy = false;
+
+/* ---------- tiny DOM helpers (never innerHTML for API data) ---------- */
+const $ = id => document.getElementById(id);
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = String(text);
+  return n;
+}
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+function skeleton(node, widths) {
+  clear(node);
+  (widths || [100, 70]).forEach(w => {
+    const s = el("div", "skel");
+    s.style.width = w + "%";
+    node.appendChild(s);
+  });
+}
+
+/* ---------- formatting ---------- */
+function money(v, cur) {
+  if (v === null || v === undefined || isNaN(Number(v))) return "\u2014";
+  const n = Number(v);
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: 2, maximumFractionDigits: 2
+  }) + (cur ? " " + cur : "");
+}
+function pct(v) {
+  if (v === null || v === undefined || isNaN(Number(v))) return "\u2014";
+  const n = Number(v);
+  return (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+}
+function when(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const mins = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + "h ago";
+  return Math.floor(hrs / 24) + "d ago";
+}
+
+/* Translate Freqtrade's exit reasons into something a non-trader understands.
+   This is the difference between a wall of jargon and actually learning. */
+const EXIT_WHY = {
+  roi: "reached its profit target",
+  stop_loss: "hit the stop loss \u2014 the safety limit that caps a loss",
+  trailing_stop_loss: "the trailing stop triggered after it started falling",
+  exit_signal: "the strategy signalled an exit",
+  sell_signal: "the strategy signalled a sell",
+  force_exit: "closed manually",
+  emergency_exit: "emergency exit \u2014 the exchange reported a problem",
+  custom_exit: "a custom exit rule triggered",
+  partial_exit: "partially sold",
+};
+function exitWhy(reason) {
+  if (!reason) return "still open";
+  return EXIT_WHY[reason] || ("closed: " + reason);
+}
+
+/* ---------- toast ---------- */
+let toastTimer = null;
+function toast(msg, kind) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (kind ? " " + kind : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = "toast"; }, 4200);
+}
+
+/* ---------- API ---------- */
+async function api(path, opts) {
+  opts = opts || {};
+  const headers = { "Authorization": "Bearer " + TOKEN };
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, {
+    method: opts.method || "GET",
+    headers: headers,
+    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+  });
+  if (res.status === 401 || res.status === 403) {
+    const e = new Error("Your access token was rejected. Sign in again.");
+    e.auth = true;
+    throw e;
+  }
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* some routes return no body */ }
+  if (!res.ok) {
+    const detail = data && (data.detail || data.message);
+    throw new Error(typeof detail === "string" ? detail : ("Request failed (" + res.status + ")"));
+  }
+  return data;
+}
+
+/* ==========================================================================
+   Panels
+   ========================================================================== */
+
+async function loadStatus() {
+  let s;
+  try { s = await api("/api/v1/status"); }
+  catch (e) { if (e.auth) return signOut(e.message); throw e; }
+
+  const live = s.dry_run === false;
+  const modePill = $("mode-pill");
+  modePill.textContent = live ? "Live money" : "Dry run";
+  modePill.className = "pill " + (live ? "pill-live" : "pill-dry");
+  modePill.title = live
+    ? "This bot is trading real money."
+    : "Simulation only. No real money is at risk.";
+
+  const running = String(s.state || "").toLowerCase() === "running";
+  const statePill = $("state-pill");
+  statePill.textContent = running ? "Trading" : (s.state || "unknown");
+  statePill.className = "pill " + (running ? "pill-ok" : "pill-off");
+
+  const cur = s.stake_currency || "";
+  $("s-balance").textContent = money(s.current_balance, cur);
+  $("s-balance-d").textContent = s.starting_balance
+    ? "started at " + money(s.starting_balance, cur) : "";
+
+  const prof = Number(s.profit_total);
+  const profitEl = $("s-profit");
+  profitEl.textContent = (isNaN(prof) ? "\u2014" : (prof >= 0 ? "+" : "") + money(prof, cur));
+  profitEl.className = "v mono " + (isNaN(prof) ? "" : (prof >= 0 ? "up" : "down"));
+  const pp = Number(s.profit_pct);
+  $("s-profit-d").textContent = isNaN(pp) ? "" : pct(pp) + " overall";
+
+  $("s-open").textContent = (s.open_trades !== undefined ? s.open_trades : "\u2014") +
+    (s.max_open_trades !== undefined ? " / " + s.max_open_trades : "");
+  $("s-open-d").textContent = "positions currently held";
+
+  $("s-strategy").textContent = s.strategy || "\u2014";
+  $("s-strategy-d").textContent = (s.timeframe || "") + (s.timeframe ? " candles" : "");
+
+  clear($("details"));
+  const rows = [
+    ["Exchange", s.exchange], ["Mode", s.runmode], ["Version", s.version],
+    ["Stake currency", s.stake_currency],
+  ];
+  rows.forEach(([k, v]) => {
+    if (v === undefined || v === null || v === "") return;
+    const row = el("div", "kv");
+    row.appendChild(el("span", "kk", k));
+    row.appendChild(el("span", "vv", v));
+    $("details").appendChild(row);
+  });
+
+  $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+}
+
+async function loadDigest(force) {
+  const box = $("digest");
+  const src = $("digest-src");
+  if (force) skeleton(box, [100, 82, 64]);
+  try {
+    const d = await api("/api/v1/explain/digest");
+    const text = d.digest || d.text || d.summary || "";
+    clear(box);
+    if (!text) {
+      box.appendChild(el("div", "empty", "No summary available yet. The first digest is generated daily at 08:00."));
+    } else {
+      box.appendChild(el("div", null, text));
+    }
+    clear(src);
+    const generated = d.generated_at || d.timestamp;
+    src.appendChild(el("span", null,
+      d.ai_generated === false || d.source === "deterministic"
+        ? "Written by the bot itself (no AI needed)"
+        : "Written by AI from your real numbers"));
+    if (generated) src.appendChild(el("span", "muted", "\u00b7 " + when(generated)));
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    clear(box);
+    box.appendChild(el("div", "empty", "Could not load the summary: " + e.message));
+    clear(src);
+  }
+}
+
+async function loadSafety() {
+  const box = $("safety");
+  try {
+    const s = await api("/api/v1/safety");
+    clear(box);
+    const prots = s.protections;
+    if (prots === null || prots === undefined) {
+      const r = el("div", "safe-row");
+      r.appendChild(el("span", "safe-ico", "\u2753"));
+      r.appendChild(el("span", "safe-name", "could not be read"));
+      box.appendChild(r);
+      box.appendChild(el("div", "empty",
+        "The safety rules could not be read from the strategy. That is not the same as them being absent \u2014 check the logs."));
+      return;
+    }
+    if (Array.isArray(prots) && prots.length === 0) {
+      const r = el("div", "safe-row");
+      r.appendChild(el("span", "safe-ico", "\u26a0\ufe0f"));
+      r.appendChild(el("span", "safe-name", "none configured"));
+      box.appendChild(r);
+      return;
+    }
+    (prots || []).forEach(p => {
+      const name = typeof p === "string" ? p : (p.method || p.name || "protection");
+      const r = el("div", "safe-row");
+      r.appendChild(el("span", "safe-ico", "\u2705"));
+      r.appendChild(el("span", "safe-name", name));
+      box.appendChild(r);
+    });
+    box.appendChild(el("div", "empty",
+      "These stop trading automatically if losses pile up. They are rules, not AI \u2014 they work even if the AI is offline."));
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    clear(box);
+    box.appendChild(el("div", "empty", "Could not read safety status: " + e.message));
+  }
+}
+
+async function loadTrades() {
+  const box = $("trades");
+  try {
+    const d = await api("/api/v1/trades?limit=12");
+    const trades = d.trades || [];
+    clear(box);
+    if (!trades.length) {
+      box.appendChild(el("div", "empty", "No trades yet. The bot is waiting for the right conditions."));
+      return;
+    }
+    trades.forEach(t => {
+      const row = el("div", "trade");
+      row.appendChild(el("div", "trade-pair", t.pair || "\u2014"));
+
+      const why = el("div", "trade-why");
+      if (t.is_open) {
+        why.appendChild(el("span", null, "Open now. "));
+      }
+      why.appendChild(el("span", null, exitWhy(t.exit_reason)));
+      if (t.open_date) why.appendChild(el("span", "muted", " \u00b7 " + when(t.open_date)));
+      row.appendChild(why);
+
+      const pl = el("div", "trade-pl");
+      const ratio = t.profit_ratio;
+      if (ratio === null || ratio === undefined) {
+        pl.textContent = t.is_open ? "open" : "\u2014";
+        pl.classList.add("muted");
+      } else {
+        pl.textContent = pct(Number(ratio) * 100);
+        pl.classList.add(Number(ratio) >= 0 ? "up" : "down");
+      }
+      row.appendChild(pl);
+      box.appendChild(row);
+    });
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    clear(box);
+    box.appendChild(el("div", "empty", "Could not load trades: " + e.message));
+  }
+}
+
+async function loadApprovals() {
+  const box = $("approvals");
+  try {
+    const d = await api("/api/v1/proposals");
+    const props = d.proposals || [];
+    clear(box);
+    if (!props.length) {
+      box.appendChild(el("div", "empty", "Nothing needs your approval."));
+      return;
+    }
+    props.forEach(p => {
+      const card = el("div", "prop");
+      const head = el("div", "prop-head");
+      head.appendChild(el("span", null, "\u23f3"));
+      head.appendChild(el("span", null, p.intent || "Change requested"));
+      card.appendChild(head);
+
+      if (p.message || p.summary) card.appendChild(el("div", "prop-body", p.message || p.summary));
+
+      const changes = p.changes || p.proposed_changes;
+      if (Array.isArray(changes) && changes.length) {
+        const ul = el("ul", "changes");
+        changes.forEach(c => {
+          if (c && typeof c === "object") {
+            const key = c.key || c.setting || "?";
+            const val = c.value !== undefined ? c.value : "";
+            ul.appendChild(el("li", null, key + " \u2192 " + val));
+          } else {
+            ul.appendChild(el("li", null, String(c)));
+          }
+        });
+        card.appendChild(ul);
+      }
+
+      const meta = el("div", "prop-meta");
+      meta.textContent = "id " + String(p.proposal_id || p.id || "").slice(0, 16) +
+        (p.expires_in_seconds ? " \u00b7 expires in " + Math.round(p.expires_in_seconds / 60) + " min" : "");
+      card.appendChild(meta);
+
+      const actions = el("div", "prop-actions");
+      const approve = el("button", "btn btn-sm btn-primary", "Approve");
+      const decline = el("button", "btn btn-sm btn-danger", "Decline");
+      approve.onclick = () => decide(p.proposal_id || p.id, true, approve, decline);
+      decline.onclick = () => decide(p.proposal_id || p.id, false, approve, decline);
+      actions.appendChild(approve);
+      actions.appendChild(decline);
+      card.appendChild(actions);
+      box.appendChild(card);
+    });
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    clear(box);
+    box.appendChild(el("div", "empty", "Could not load approvals: " + e.message));
+  }
+}
+
+async function decide(proposalId, approve, approveBtn, declineBtn) {
+  if (!proposalId) { toast("This proposal has no id and cannot be actioned.", "bad"); return; }
+  approveBtn.disabled = declineBtn.disabled = true;
+  try {
+    // The route returns {status, result}, not {message}. Reading r.message here
+    // silently fell through to a flat "Approved." on every call, discarding the
+    // apply summary - so a proposal where one change succeeded and another was
+    // refused looked identical to one that fully worked.
+    const r = await api("/api/v1/approve", {
+      method: "POST", body: { proposal_id: proposalId, approve: approve },
+    });
+
+    let msg;
+    if (approve === false || r.status === "rejected") {
+      msg = "Declined. Nothing was changed.";
+    } else {
+      const sum = (r.result && r.result.summary) || null;
+      if (sum && typeof sum === "object") {
+        const applied = Number(sum.applied || 0);
+        const failed = Number(sum.refused || 0) + Number(sum.failed || 0);
+        const total = Number(sum.total || applied + failed);
+        if (failed > 0) {
+          msg = "Approved, but " + failed + " of " + total +
+                " change(s) could not be applied. Check the audit log for why.";
+        } else if (total > 0) {
+          msg = "Approved \u2014 " + applied + " of " + total + " change(s) applied.";
+        } else {
+          msg = "Approved.";
+        }
+      } else {
+        msg = "Approved.";
+      }
+    }
+    toast(msg, approve && r.status !== "rejected" ? "ok" : "");
+    await Promise.all([loadApprovals(), loadStatus()]);
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    toast(e.message, "bad");
+    approveBtn.disabled = declineBtn.disabled = false;
+  }
+}
+
+/* ==========================================================================
+   Chat
+   ========================================================================== */
+
+function addMsg(text, cls) {
+  const log = $("chat-log");
+  const m = el("div", "msg " + cls);
+  m.textContent = text;
+  log.appendChild(m);
+  log.scrollTop = log.scrollHeight;
+  return m;
+}
+function addTyping() {
+  const log = $("chat-log");
+  const t = el("div", "typing");
+  t.appendChild(el("i")); t.appendChild(el("i")); t.appendChild(el("i"));
+  log.appendChild(t);
+  log.scrollTop = log.scrollHeight;
+  return t;
+}
+
+async function send(text) {
+  text = (text || "").trim();
+  if (!text || busy) return;
+  busy = true;
+  $("send-btn").disabled = true;
+  addMsg(text, "msg-user");
+  $("chat-in").value = "";
+  const typing = addTyping();
+
+  try {
+    const r = await api("/api/v1/command", { method: "POST", body: { command: text } });
+    typing.remove();
+
+    let reply = r.message || "";
+    if (!reply) {
+      if (r.status === "pending_approval") reply = "I can't apply that myself \u2014 it needs your approval.";
+      else if (r.status === "executed") reply = "Done.";
+      else reply = "I understood that as: " + (r.intent || "something I couldn't classify") + ".";
+    }
+    const bubble = addMsg(reply, "msg-bot");
+
+    // Show the proposed values inline so the operator can read them without
+    // hunting through a JSON response.
+    if (Array.isArray(r.proposed_changes) && r.proposed_changes.length) {
+      const ul = el("ul", "changes");
+      r.proposed_changes.forEach(c => {
+        if (c && typeof c === "object") {
+          ul.appendChild(el("li", null,
+            (c.key || "?") + " \u2192 " + (c.value !== undefined ? c.value : "")));
+        }
+      });
+      bubble.appendChild(ul);
+    }
+
+    if (r.status === "pending_approval" && r.proposal_id) {
+      const actions = el("div", "prop-actions");
+      const a = el("button", "btn btn-sm btn-primary", "Approve");
+      const d = el("button", "btn btn-sm btn-danger", "Decline");
+      a.onclick = () => decide(r.proposal_id, true, a, d);
+      d.onclick = () => decide(r.proposal_id, false, a, d);
+      actions.appendChild(a); actions.appendChild(d);
+      bubble.appendChild(actions);
+      toast("Sent for your approval \u2014 see \u201cWaiting for you\u201d.", "ok");
+    }
+
+    await Promise.all([loadApprovals(), loadStatus()]);
+  } catch (e) {
+    typing.remove();
+    if (e.auth) return signOut(e.message);
+    addMsg(e.message, "msg-err");
+  } finally {
+    busy = false;
+    $("send-btn").disabled = false;
+    $("chat-in").focus();
+  }
+}
+
+/* ==========================================================================
+   Controls
+   ========================================================================== */
+
+async function runPlugin(name, label, btn) {
+  if (btn) btn.disabled = true;
+  addMsg("Running " + label + "\u2026", "msg-sys");
+  try {
+    await api("/api/v1/plugins/" + encodeURIComponent(name) + "/control",
+      { method: "POST", body: { action: "run" } });
+    toast(label + " finished.", "ok");
+    addMsg(label + " finished. Check the summary above.", "msg-sys");
+    await Promise.all([loadDigest(true), loadApprovals()]);
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    toast(e.message, "bad");
+    addMsg(e.message, "msg-err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function botControl(action, label) {
+  try {
+    const r = await api("/api/v1/command", {
+      method: "POST", body: { command: action === "pause" ? "pause trading" : "resume trading" },
+    });
+    toast(r.message || label + " done.", "ok");
+    await loadStatus();
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    toast(e.message, "bad");
+  }
+}
+
+/* ==========================================================================
+   Boot
+   ========================================================================== */
+
+function signOut(message) {
+  localStorage.removeItem(TOKEN_KEY);
+  TOKEN = "";
+  $("app").classList.add("hidden");
+  $("connect").classList.remove("hidden");
+  $("tok").value = "";
+  $("connect-err").textContent = message || "";
+  $("tok").focus();
+}
+
+async function refreshAll(initial) {
+  try {
+    await Promise.all([
+      loadStatus(), loadDigest(initial), loadSafety(),
+      loadTrades(), loadApprovals(),
+    ]);
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    toast(e.message, "bad");
+  }
+}
+
+async function start() {
+  $("connect").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  addMsg("Connected. Ask me anything about the bot, or try one of the suggestions below.", "msg-sys");
+  await refreshAll(true);
+}
+
+async function tryConnect(token) {
+  TOKEN = token;
+  const btn = $("connect-btn");
+  btn.disabled = true;
+  btn.textContent = "Checking\u2026";
+  $("connect-err").textContent = "";
+  try {
+    await api("/api/v1/health/detail");
+    localStorage.setItem(TOKEN_KEY, token);
+    await start();
+  } catch (e) {
+    TOKEN = "";
+    $("connect-err").textContent = e.auth
+      ? "That token was rejected. Check the orchestrator_api_token secret."
+      : ("Could not reach the bot: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Connect";
+  }
+}
+
+$("connect-btn").onclick = () => {
+  const v = $("tok").value.trim();
+  if (!v) { $("connect-err").textContent = "Enter your access token."; return; }
+  tryConnect(v);
+};
+$("tok").addEventListener("keydown", e => { if (e.key === "Enter") $("connect-btn").click(); });
+$("forget-btn").onclick = () => signOut("Signed out.");
+$("refresh-btn").onclick = () => { refreshAll(false); toast("Refreshed."); };
+$("digest-btn").onclick = () => loadDigest(true);
+$("send-btn").onclick = () => send($("chat-in").value);
+$("chat-in").addEventListener("keydown", e => { if (e.key === "Enter") send($("chat-in").value); });
+$("pause-btn").onclick = () => botControl("pause", "Trading paused");
+$("resume-btn").onclick = () => botControl("resume", "Trading resumed");
+$("gen-btn").onclick = e => runPlugin("strategy_generator", "Strategy generation", e.target);
+$("analysis-btn").onclick = e => runPlugin("market_analyst", "Market analysis", e.target);
+
+document.querySelectorAll("#suggestions .chip").forEach(c => {
+  c.onclick = () => send(c.textContent);
+});
+
+// Restore a saved session, and auto-refresh the read-only panels. The digest is
+// deliberately NOT re-fetched on the timer: it is the expensive call.
+(function boot() {
+  const saved = localStorage.getItem(TOKEN_KEY);
+  if (saved) tryConnect(saved);
+  else $("tok").focus();
+
+  setInterval(() => {
+    if (!TOKEN || document.hidden) return;
+    loadStatus().catch(() => {});
+    loadApprovals().catch(() => {});
+  }, 30000);
+})();
+</script>
+</body>
+</html>

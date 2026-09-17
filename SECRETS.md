@@ -219,15 +219,26 @@ and store the output as the `orchestrator_api_token` Swarm secret. Then:
 curl -H "Authorization: Bearer <token>" http://<host>:8082/api/v1/status
 ```
 
-The orchestrator port is **not published to the host**. To reach the API, tunnel
-in explicitly rather than exposing it:
+The orchestrator port **is published on the host** as `8082`, so the operator UI
+is reachable at `http://<pi-ip>:8082` and the API at the same address.
+
+It used to be unpublished, because the approval endpoint would apply a change
+list supplied in the request body — so anything that could reach the host could
+approve changes that were never proposed. That is fixed: approval now requires a
+`proposal_id` this process issued, is single-use, expires after 30 minutes, and
+is re-validated before anything is applied. Every route except `/health` and the
+static UI page still requires the bearer token.
+
+On a local network that is a reasonable trade. If the Pi is ever reachable from
+outside your LAN, put it behind a VPN or a TLS reverse proxy rather than relying
+on the token alone. To go back to tunnel-only access, remove the `ports:` entry
+from the `ai-orchestrator` service and tunnel in:
 
 ```bash
-# From your machine, forward the port through the Pi
 ssh -L 8082:localhost:8082 <user>@<pi-host>
 ```
 
-or run a throwaway container on the swarm network:
+Or reach it from inside the swarm network without publishing anything:
 
 ```bash
 docker run --rm -it --network kraken-bot-network curlimages/curl \

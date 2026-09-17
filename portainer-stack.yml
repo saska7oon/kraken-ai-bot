@@ -176,16 +176,35 @@ services:
     networks:
       - botnet
 
-    # Deliberately NOT published to the host.
+    # Published so the operator UI is reachable in a browser.
     #
-    # This port used to be published as "8082:8082", which exposed the
-    # orchestrator - including its approval endpoint, which could apply changes -
-    # to anything that could reach the host. It now talks only over the internal
-    # swarm network. To reach it from your machine, tunnel it explicitly:
+    # This port was previously NOT published, because it exposed the approval
+    # endpoint and that endpoint would apply a change list supplied in the
+    # request body - so anyone who could reach the host could approve changes
+    # that were never proposed. That specific hole is closed:
     #
-    #   ssh -L 8082:localhost:8082 <pi-host>   # then port-forward inside swarm
+    #   * every route except /health and / (the static UI page) requires the
+    #     orchestrator_api_token bearer secret, and the service fails closed if
+    #     that secret is missing;
+    #   * /api/v1/approve requires a proposal_id that this process issued, is
+    #     single-use, expires after 30 minutes, and is re-validated against the
+    #     frozen-key and bounds rules before anything is applied;
+    #   * the request body can no longer supply changes at all.
     #
-    # or run a one-off debug container attached to kraken-bot-network.
+    # The page served at / contains no secrets: the operator types the token into
+    # the browser and it stays in that browser. Fetching the page grants nothing
+    # that a curl user does not already have.
+    #
+    # Residual exposure, stated plainly: on a flat home network, anyone who can
+    # reach this host sees a login page and can attempt the token. Treat the
+    # token as the credential it is - long and random - and if the Pi is ever
+    # reachable from outside your LAN, put it behind a VPN or reverse proxy with
+    # TLS rather than relying on the token alone. To go back to tunnel-only
+    # access, delete these two lines and use:
+    #
+    #   ssh -L 8082:localhost:8082 <pi-host>
+    ports:
+      - "8082:8082"
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
