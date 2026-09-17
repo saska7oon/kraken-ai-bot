@@ -465,8 +465,15 @@ import ast  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 PLUGINS = REPO / "ai_orchestrator" / "plugins"
 
-# Nothing the AI can reach may import the settings writer.
+# `nl_config` is the one plugin allowed to reach the settings writer, because an
+# approved proposal now applies a configuration change instead of handing the
+# operator values to paste into a Swarm config. That makes the gate - not the
+# import - the thing to test, which the behavioural checks below do.
+#
+# Every OTHER plugin must stay away from it entirely.
 for path in sorted(PLUGINS.glob("*.py")):
+    if path.name == "nl_config.py":
+        continue
     source = path.read_text(encoding="utf-8")
     check("%s does not import settings_store" % path.name, "settings_store" not in source)
     check("%s does not import dryrun_reset" % path.name, "dryrun_reset" not in source)
@@ -476,6 +483,217 @@ for path in sorted(PLUGINS.glob("*.py")):
 for path in sorted(PLUGINS.glob("*.py")):
     source = path.read_text(encoding="utf-8")
     check("%s does not name the settings file" % path.name, "runtime_settings" not in source)
+
+
+# --- the approval gate, tested behaviourally -------------------------------
+# The claim is not "the AI cannot touch settings" - it is "the AI cannot change
+# settings without the operator approving a specific, fingerprinted, unexpired
+# proposal". That is a runtime property, so it is tested at runtime.
+import asyncio as _asyncio  # noqa: E402
+import importlib  # noqa: E402
+import types  # noqa: E402
+
+# `nl_config` reaches `freqtrade_api`, which imports aiohttp. The dev environment
+# has no aiohttp, and installing one just to import a module would make this test
+# depend on the network. A stub is enough: nothing below performs a request - the
+# gate is decided before any client is used, which is exactly the property being
+# tested.
+if "aiohttp" not in sys.modules:
+    _aiohttp = types.ModuleType("aiohttp")
+
+    class _ClientError(Exception):
+        pass
+
+    class _ClientSession:  # pragma: no cover - never instantiated here
+        def __init__(self, *a, **k):
+            self.closed = False
+
+    _aiohttp.ClientError = _ClientError
+    _aiohttp.ClientSession = _ClientSession
+    _aiohttp.ClientTimeout = lambda *a, **k: None
+    _aiohttp.BasicAuth = lambda *a, **k: None
+    sys.modules["aiohttp"] = _aiohttp
+
+nl_config = importlib.import_module("ai_orchestrator.plugins.nl_config")
+
+
+class _StubAudit:
+    """Records nothing, succeeds at everything.
+
+    `_apply_changes` fails closed when the audit log cannot be written, so a stub
+    that raised would make every gate test pass for the wrong reason - the write
+    would be skipped because auditing failed, not because approval was missing.
+    """
+
+    def __init__(self):
+        self.entries = []
+
+    async def log(self, **kwargs):
+        self.entries.append(kwargs)
+        return True
+
+    async def log_config_change(self, **kwargs):
+        self.entries.append(kwargs)
+        return True
+
+
+class _StubOrchestrator:
+    openrouter_client = None
+    freqtrade_client = None
+    audit_logger = _StubAudit()
+
+
+def _plugin():
+    plugin = nl_config.NLConfigPlugin.__new__(nl_config.NLConfigPlugin)
+    plugin.openrouter = None
+    plugin.freqtrade = None
+    plugin.audit = _StubAudit()
+    plugin.logger = __import__("logging").getLogger("test")
+    plugin._pending_proposals = {}
+    plugin.proposal_ttl_seconds = 1800
+    plugin.auto_apply_safe = False
+    plugin.require_approval_for = []
+    return plugin
+
+
+def _config_change():
+    return {
+        "type": "proposal_only",
+        "key": "max_open_trades",
+        "value": 2,
+        "description": "Allow at most 2 trades at once",
+        "applies_via": "settings",
+    }
+
+
+def _write_count():
+    return len(list(settings_store.SETTINGS_DIR.glob("*.json")))
+
+
+def _run_apply(plugin, changes, **kwargs):
+    return _asyncio.run(plugin._apply_changes(changes, **kwargs))
+
+
+# Reset the settings directory so the count is meaningful.
+for f in settings_store.SETTINGS_DIR.glob("*.json"):
+    f.unlink()
+
+before = settings_store.read().settings
+plugin = _plugin()
+
+# 1. No approver, no approval source: must propose, must not write.
+result = _run_apply(plugin, [_config_change()], source="command_no_approval")
+check("an unapproved change is not written",
+      settings_store.read().settings == before, str(settings_store.read().settings))
+check("an unapproved change reports as proposed",
+      result["executed"] and result["executed"][0]["status"] == "proposed",
+      str(result["executed"]))
+
+# 2. An approver but the WRONG source: still must not write. This is the case a
+#    future caller is most likely to get wrong.
+result = _run_apply(plugin, [_config_change()], approved_by="alice", source="command_no_approval")
+check("an approver with the wrong source is not written",
+      settings_store.read().settings == before, str(settings_store.read().settings))
+check("an approver with the wrong source reports as proposed",
+      result["executed"][0]["status"] == "proposed", str(result["executed"][0]))
+
+# 3. The right source but NO approver: still must not write.
+result = _run_apply(plugin, [_config_change()], source="approval")
+check("the approval source without an approver is not written",
+      settings_store.read().settings == before, str(settings_store.read().settings))
+
+# 4. Both, as an approved proposal supplies: now it applies.
+result = _run_apply(plugin, [_config_change()], approved_by="alice", source="approval")
+check("an approved change is written",
+      settings_store.read().settings.get("max_open_trades") == 2,
+      str(settings_store.read().settings))
+check("an approved change reports as applied",
+      result["executed"][0]["status"] in ("applied", "saved_not_applied"),
+      str(result["executed"][0]))
+
+# 5. dry_run stays frozen even on the approved path: the AI can never propose the
+#    live switch, so an approval can never carry it.
+frozen_change = plugin._config_change("dry_run", False)
+check("dry_run is refused at proposal time", frozen_change.get("frozen") is True
+      or frozen_change.get("invalid") is True, str(frozen_change))
+result = _run_apply(plugin, [frozen_change], approved_by="alice", source="approval")
+check("an approved list cannot carry dry_run",
+      settings_store.read().settings.get("dry_run") is None,
+      str(settings_store.read().settings))
+check("dry_run in an approved list is refused",
+      result["executed"][0]["status"] == "refused", str(result["executed"][0]))
+
+# 6. A key the AI may PROPOSE but the settings layer cannot apply is refused at
+#    apply time. This is the case that makes the second gate load-bearing: an
+#    earlier version of this test used `api_server`, which `_validate_change`
+#    already refuses, so removing the second gate went undetected.
+#
+#    `strategy` is exactly this shape - proposable, but set by a --strategy
+#    command-line argument that Freqtrade lets override the config, so writing it
+#    to the settings file would be a silent no-op.
+strategy_change = plugin._config_change("strategy", "SomeOtherStrategy")
+check("strategy is proposable", not strategy_change.get("invalid")
+      and not strategy_change.get("frozen"), str(strategy_change))
+check("a strategy proposal is marked as needing a redeploy",
+      strategy_change.get("applies_via") == "redeploy",
+      str(strategy_change.get("applies_via")))
+
+before_strategy = settings_store.read().settings
+result = _run_apply(plugin, [strategy_change], approved_by="alice", source="approval")
+check("an approved strategy change is refused",
+      result["executed"][0]["status"] == "refused", str(result["executed"][0]))
+check("a refused strategy change writes nothing",
+      settings_store.read().settings == before_strategy,
+      str(settings_store.read().settings))
+check("the strategy refusal explains the redeploy",
+      "redeploy" in (result["executed"][0].get("reason") or "").lower(),
+      str(result["executed"][0].get("reason")))
+
+# A genuinely unknown key is refused too.
+rogue = {"type": "proposal_only", "key": "api_server", "value": "x", "description": "x"}
+result = _run_apply(plugin, [rogue], approved_by="alice", source="approval")
+check("a non-editable key is refused on the approved path",
+      result["executed"][0]["status"] == "refused", str(result["executed"][0]))
+
+# 6b. The two keys the AI proposes and the settings layer CAN apply must agree,
+#     or the operator is offered a change that cannot be carried out.
+for proposable in ("trailing_stop_positive", "amount_reserve_percent", "stoploss",
+                   "max_open_trades", "tradable_balance_ratio"):
+    check("%s is both proposable and applicable" % proposable,
+          proposable in nl_config.PROPOSABLE_KEYS
+          and proposable in settings_store.EDITABLE_BY_KEY,
+          "proposable=%s applicable=%s" % (
+              proposable in nl_config.PROPOSABLE_KEYS,
+              proposable in settings_store.EDITABLE_BY_KEY))
+
+# Everything else the AI can propose must be honestly marked as not applicable
+# here, rather than silently failing at apply time.
+for proposable in sorted(nl_config.PROPOSABLE_KEYS):
+    if proposable in settings_store.EDITABLE_BY_KEY:
+        continue
+    check("%s is marked as needing a redeploy" % proposable,
+          plugin._config_change(proposable, 1).get("applies_via") == "redeploy",
+          str(plugin._config_change(proposable, 1).get("applies_via")))
+
+# 7. The old marker must be gone from the CODE, or the operator still gets told
+#    to paste values into a Swarm config. Comments are excluded deliberately: the
+#    code explains what it used to do, and a naive substring check would flag its
+#    own explanation.
+import io  # noqa: E402
+import tokenize  # noqa: E402
+
+_literals = []
+with (PLUGINS / "nl_config.py").open("rb") as _fh:
+    for _tok in tokenize.tokenize(_fh.readline):
+        if _tok.type == tokenize.STRING:
+            _literals.append(_tok.string)
+
+check("no code still claims a change needs a redeploy",
+      not any("config_redeploy" in lit for lit in _literals),
+      "found in a string literal")
+check("the check can see string literals at all",
+      any("settings" in lit for lit in _literals),
+      "tokenizer found no strings, so the check above proves nothing")
 
 # The command path must not route to the settings routes.
 main_source = (REPO / "ai_orchestrator" / "main.py").read_text(encoding="utf-8")

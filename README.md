@@ -537,14 +537,45 @@ You do not have to edit JSON in Portainer to change how the bot trades. The
 | **Maximum open trades**, **stop loss**, **balance used**, **simulation wallet** | Each has a safe range, enforced server-side |
 | **Undo last change** | Keeps the previous version of the file |
 
+### Approving an AI suggestion now applies it
+
+When you ask the AI to change something, it proposes specific values and waits.
+**Approving applies them to the running bot** — no redeploy, no pasting values
+into a Swarm config. Previously approval only recorded your decision and handed
+you the values to apply yourself, which made the approval a formality rather than
+a decision.
+
+The gate is unchanged and is what keeps "may propose" and "may apply" apart: a
+change is applied only from a stored proposal that you explicitly approved, and
+only if it is unexpired, unused, and still matches its fingerprint. A test calls
+the apply path four ways — no approver, wrong source, source without approver,
+and both — and asserts nothing is written except in the last case.
+
+**One exception, stated honestly:** the strategy is set by a `--strategy`
+command-line argument, and Freqtrade's `_process_common_options` overwrites the
+config value with it:
+
+```python
+if self.args.get("strategy") or not config.get("strategy"):
+    config.update({"strategy": self.args.get("strategy")})
+```
+
+So a strategy written into the settings file would be **silently ignored**.
+Strategy changes are therefore marked as needing a redeploy, and the AI says so
+rather than reporting a success you would never see. Everything else the AI can
+propose is now applicable — a test asserts the two lists agree, so the bot can
+never offer you a change it cannot carry out.
+
 ### Why this does not weaken anything
 
 The safety model was never "the operator cannot change configuration" — it is
 **the AI cannot change configuration behind your back**. Those are different
 claims, and this panel only touches the second one:
 
-- **No plugin, chat command or proposal can reach these routes.** The AI proposes;
-  you decide. A test asserts the AI-facing surface cannot write settings at all.
+- **The AI cannot change anything without your approval.** It may propose; a
+  change is applied only from a proposal you approved, unexpired, unused, and
+  matching its fingerprint. Tests drive the apply path with each part of that
+  gate missing and assert nothing is written.
 - **Credentials are never accepted here.** There is no key for an API key, a
   secret, or the exchange block — so "change the API key from the UI" is not a
   guarded operation, it is an absent one. Secrets stay in Docker Swarm secrets.

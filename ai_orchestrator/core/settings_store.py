@@ -169,6 +169,39 @@ EDITABLE: Tuple[Setting, ...] = (
             "something."
         ),
     ),
+    # The two below are here so that the AI's proposals can actually be applied.
+    # `nl_config` can propose them, and before this they were refused by the
+    # allowlist at apply time - so the operator was offered a change that could
+    # not be carried out. Both are ordinary config keys, so the settings layer
+    # can apply them; `strategy` is deliberately NOT here, because the stack
+    # passes --strategy on the command line and Freqtrade's own
+    # `_process_common_options` overwrites the config value with it, making a
+    # settings-based strategy change a silent no-op.
+    Setting(
+        key="trailing_stop_positive",
+        label="Trailing stop",
+        kind="float",
+        minimum=0.005,
+        maximum=0.10,
+        help="Once in profit by this much, follow the price up and exit on a pullback",
+        explain=(
+            "Lets a winning trade keep running instead of closing at a fixed "
+            "target, but gives back this much of the peak before it exits. A "
+            "smaller number locks in profit sooner."
+        ),
+    ),
+    Setting(
+        key="amount_reserve_percent",
+        label="Fee buffer",
+        kind="float",
+        minimum=0.0,
+        maximum=0.20,
+        help="Extra balance held back to cover fees and slippage",
+        explain=(
+            "Stops the bot spending the last of the balance on a trade and then "
+            "having nothing left for the exchange fee."
+        ),
+    ),
 )
 
 EDITABLE_BY_KEY: Dict[str, Setting] = {s.key: s for s in EDITABLE}

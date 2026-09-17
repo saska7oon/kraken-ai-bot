@@ -84,6 +84,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from ai_orchestrator.core import settings_store
 from ai_orchestrator.core.freqtrade_api import FreqtradeAPIError, UnsupportedOperation
 from ai_orchestrator.core.plugin_manager import BasePlugin, PluginConfig
 
@@ -98,10 +99,10 @@ logger = logging.getLogger(__name__)
 FROZEN_KEYS: Dict[str, str] = {
     "dry_run": (
         "Switching between simulation and live trading cannot be done through the AI "
-        "interface. This is deliberate: live mode places real orders with real money. "
-        "To go live you must edit the 'freqtrade_canada_config' Swarm config in "
-        "Portainer, change dry_run to false, and redeploy - and you should have weeks "
-        "of satisfactory dry-run results first."
+        "interface, with or without approval. This is deliberate: live mode places "
+        "real orders with real money, so it is the operator's decision alone. Use the "
+        "Settings panel and type the confirmation phrase. You should have weeks of "
+        "satisfactory dry-run results first."
     ),
     "exchange": "Exchange credentials are managed as Swarm secrets only.",
     "exchange.key": "Exchange credentials are managed as Swarm secrets only.",
@@ -1119,7 +1120,26 @@ Examples:
             "key": key,
             "value": value,
             "description": description,
-            "applies_via": "config_redeploy",
+            # How an approval would take effect.
+            #
+            #   "settings" - applied to the running bot through the operator
+            #                settings layer, because Freqtrade's reload_config
+            #                does re-read its config files. This used to be
+            #                "config_redeploy", from when nothing could change a
+            #                running bot and the operator had to hand-edit a
+            #                Swarm config.
+            #
+            #   "redeploy" - genuinely needs a redeploy. The strategy is set by
+            #                a --strategy command-line argument, and Freqtrade's
+            #                `_process_common_options` overwrites the config
+            #                value with it:
+            #                    if self.args.get("strategy") or not config.get(...):
+            #                        config.update({"strategy": self.args.get("strategy")})
+            #                So a strategy written into the settings file would be
+            #                silently ignored. Claiming otherwise would be worse
+            #                than the old message, because the operator would
+            #                approve a change, see success, and get nothing.
+            "applies_via": "redeploy" if key == "strategy" else "settings",
             "plain_language": "",
         }
 
@@ -1261,13 +1281,21 @@ Examples:
             if change.get("plain_language"):
                 lines.append(f"      What this means: {change['plain_language']}")
 
-        if any(c.get("applies_via") == "config_redeploy" for c in changes):
+        if any(c.get("applies_via") == "settings" for c in changes):
             lines += [
                 "",
-                "IMPORTANT: Freqtrade cannot change these settings while running.",
-                "Approving records your decision and gives you the exact values to put",
-                "into the 'freqtrade_canada_config' Swarm config, then redeploy.",
-                "Nothing changes until you do that.",
+                "Approving applies these to the running bot. Freqtrade re-reads its",
+                "configuration on request, so no redeploy is needed.",
+                "Nothing changes unless you approve.",
+            ]
+
+        if any(c.get("applies_via") == "redeploy" for c in changes):
+            lines += [
+                "",
+                "One of these cannot be applied to a running bot: the strategy is set",
+                "by a command-line argument, which overrides the config, so it needs a",
+                "redeploy. Approving it records your decision and tells you the value",
+                "to set; nothing changes until you redeploy.",
             ]
 
         if proposal is not None:
@@ -1296,6 +1324,93 @@ Examples:
         ]
 
     # ------------------------------------------------------------------- apply
+    async def _apply_config_change(
+        self, change: Dict[str, Any], *, approved_by: str
+    ) -> Dict[str, Any]:
+        """Apply one approved configuration change to the running bot.
+
+        Reached only from an approved proposal. The gate lives in
+        `_apply_one_change`, which requires both a named approver and the
+        approval source - so this method existing is not itself a capability.
+
+        The value is validated a second time here, against the operator settings
+        allowlist, even though `_validate_change` already bounded it. That is
+        deliberate duplication: `_validate_change` encodes what the AI is allowed
+        to *ask* for, while the settings allowlist encodes what may reach the
+        bot's configuration at all. Those are different rules, and the second one
+        has to hold regardless of how a value arrived.
+        """
+        key = change.get("key")
+        value = change.get("value")
+
+        if not isinstance(key, str) or key not in settings_store.EDITABLE_BY_KEY:
+            # The allowlist is the second gate, and `strategy` is the case that
+            # makes it load-bearing: `_validate_change` permits it, but it cannot
+            # be applied here, because the stack passes --strategy and Freqtrade
+            # overwrites the config value with that argument.
+            self.logger.error(
+                "Refused an approved config change to non-editable key %r", key
+            )
+            if change.get("applies_via") == "redeploy":
+                reason = (
+                    "The strategy is set by a command-line argument, which "
+                    "overrides the configuration, so it cannot be changed on a "
+                    "running bot. Change the --strategy argument in the stack and "
+                    "redeploy. Your decision has been recorded."
+                )
+            else:
+                reason = "%s is not a setting that can be changed here." % key
+            return {"change": change, "status": "refused", "reason": reason}
+
+        try:
+            clean = settings_store.validate({key: value})
+        except settings_store.SettingsError as e:
+            return {"change": change, "status": "refused", "reason": e.message}
+
+        # Merged onto what is already set rather than replacing it, or approving
+        # one change would silently discard every earlier one.
+        merged = dict(settings_store.read().settings)
+        merged.update(clean)
+
+        try:
+            settings_store.write(merged, actor=approved_by)
+        except OSError as e:
+            return {
+                "change": change,
+                "status": "failed",
+                "reason": "Could not save the setting: %s" % e,
+            }
+
+        applied = True
+        reload_error: Optional[str] = None
+        if self.freqtrade is not None:
+            try:
+                await self.freqtrade.reload_config()
+            except Exception as e:  # noqa: BLE001 - report, never raise
+                applied = False
+                reload_error = str(e)
+        else:
+            applied = False
+            reload_error = "the Freqtrade API client is not available"
+
+        return {
+            "change": change,
+            "status": "applied" if applied else "saved_not_applied",
+            "key": key,
+            "value": clean.get(key),
+            "description": change.get("description"),
+            "applied": applied,
+            "reload_error": reload_error,
+            "note": (
+                "Applied to the running bot."
+                if applied
+                else (
+                    "Saved, but the bot has not picked it up yet: %s. It will take "
+                    "effect on the next restart." % reload_error
+                )
+            ),
+        }
+
     async def _apply_changes(
         self,
         changes: List[Dict[str, Any]],
@@ -1395,7 +1510,11 @@ Examples:
         executed: List[Dict[str, Any]] = []
         try:
             for change in changes:
-                executed.append(await self._apply_one_change(change))
+                executed.append(
+                    await self._apply_one_change(
+                        change, approved_by=approved_by, source=source
+                    )
+                )
         finally:
             # Always written, including when a change raised. Without this the
             # audit trail would show an apply that never ended.
@@ -1469,13 +1588,25 @@ Examples:
                 summary["other"] += 1
         return summary
 
-    async def _apply_one_change(self, change: Any) -> Dict[str, Any]:
+    async def _apply_one_change(
+        self,
+        change: Any,
+        *,
+        approved_by: Optional[str] = None,
+        source: str = "direct",
+    ) -> Dict[str, Any]:
         """
         Carry out one change. Never raises.
 
         Any failure becomes a per-change result with ``status: "failed"``, so the
         caller can report exactly which change failed instead of losing the whole
         response - and instead of aborting the changes that came after it.
+
+        ``approved_by`` and ``source`` decide whether a configuration change is
+        actually applied. Only an approved proposal applies one; every other path
+        returns the values as a proposal for the operator to act on. This is the
+        single gate that keeps "the AI may propose" and "the AI may apply" apart,
+        so it is checked here rather than trusted to the caller.
         """
         try:
             if not isinstance(change, dict):
@@ -1494,6 +1625,14 @@ Examples:
                         "status": "refused",
                         "reason": change.get("frozen_reason") or change.get("reason"),
                     }
+
+                # Applying requires a named approver AND the approval source.
+                # Requiring both means a future caller that passes one but not
+                # the other gets the propose-only behaviour rather than an
+                # accidental write.
+                if approved_by and source == "approval":
+                    return await self._apply_config_change(change, approved_by=approved_by)
+
                 return {
                     "change": change,
                     "status": "proposed",
