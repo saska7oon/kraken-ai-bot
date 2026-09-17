@@ -573,6 +573,16 @@ def main() -> int:
         # call them, which test_settings.py asserts separately.
         "/api/v1/settings", "/api/v1/settings/preset", "/api/v1/settings/undo",
         "/api/v1/settings/reset-dryrun",
+        # Starting, pausing and stopping the bot. A deliberate operator action
+        # from the control panel. It is its own endpoint rather than a phrase
+        # sent to /api/v1/command because intent parsing should not stand
+        # between a button labelled Stop and the bot stopping - the operator is
+        # entitled to have exactly what the label says happen.
+        #
+        # It adds no capability the AI can reach: the endpoint accepts one of
+        # three literal actions, requires the bearer token, and is audited with
+        # the operator's name.
+        "/api/v1/bot/control",
     }
     unexpected = [w for w in writes if w not in allowed_writes]
     if unexpected:

@@ -6,6 +6,18 @@
 <meta name="color-scheme" content="dark">
 <title>Kraken AI Bot</title>
 <!--
+  Inline SVG favicon, as a data URI.
+
+  Without this the browser requests /favicon.ico, gets a 404 from FastAPI, and
+  logs an error on every page load - noise that makes a working deployment look
+  broken to anyone reading the console. A data URI costs one attribute: no
+  route, no extra file, no cache header to get wrong.
+
+  The mark is a rising trend line with a candle, drawn in the page's own accent
+  colours so the tab matches the UI.
+-->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0f18'/%3E%3Cpath d='M6 22l6-6 4 4 7-8' stroke='%234da3ff' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='20' y='6' width='4' height='10' rx='1' fill='%2334d399'/%3E%3C/svg%3E">
+<!--
   Single-page operator UI for the AI orchestrator.
   ================================================
 
@@ -116,6 +128,9 @@ input:focus{border-color:rgba(34,211,238,.55);box-shadow:0 0 0 3px rgba(34,211,2
   box-shadow:0 6px 22px -6px rgba(34,211,238,.5);
 }
 .btn-primary:hover{filter:brightness(1.08)}
+/* Destructive action. Now also used for "Stop the bot", which sits beside
+   "Pause trading" and does something materially different, so it should not be
+   reachable by muscle memory. */
 .btn-danger{border-color:rgba(251,113,133,.35);color:var(--down)}
 .btn-danger:hover{background:rgba(251,113,133,.12)}
 .btn-sm{padding:7px 13px;font-size:12.5px;border-radius:9px}
@@ -310,6 +325,9 @@ header{
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast.ok{border-color:rgba(52,211,153,.4)}
 .toast.bad{border-color:rgba(251,113,133,.45)}
+/* Not a failure, but not a success either: used for the "stop" reply, which
+   reports a consequence the operator should read rather than skim. */
+.toast.warn{border-color:rgba(251,191,36,.5)}
 .hidden{display:none!important}
 a.link{color:var(--cyan);text-decoration:none}
 a.link:hover{text-decoration:underline}
@@ -399,9 +417,15 @@ a.link:hover{text-decoration:underline}
 
       <div class="card">
         <h2>Controls</h2>
-        <div style="display:flex;gap:9px;flex-wrap:wrap">
-          <button class="btn btn-sm" id="pause-btn">Pause trading</button>
-          <button class="btn btn-sm" id="resume-btn">Resume trading</button>
+        <!--
+          The bot-state buttons are rendered from the bot's real state rather
+          than shown all at once. Offering "Pause" and "Resume" simultaneously
+          asks the operator to work out which one applies, and the two that
+          matter most - start and stop - were not offered at all.
+        -->
+        <div id="bot-controls" style="display:flex;gap:9px;flex-wrap:wrap"></div>
+        <div id="bot-control-help" class="set-help" style="margin-top:9px"></div>
+        <div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:12px">
           <button class="btn btn-sm" id="gen-btn">Generate a strategy</button>
           <button class="btn btn-sm" id="analysis-btn">Market check</button>
         </div>
@@ -509,7 +533,12 @@ function toast(msg, kind) {
   t.textContent = msg;
   t.className = "toast show" + (kind ? " " + kind : "");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.className = "toast"; }, 4200);
+  // A fixed 4.2s is fine for "Settings saved" and far too short for the reply
+  // to stopping the bot, which explains what happened to any open trades. Scale
+  // the lifetime with the text so a message is readable for as long as it takes
+  // to read, within sane bounds.
+  const ms = Math.max(4200, Math.min(20000, 2600 + String(msg).length * 55));
+  toastTimer = setTimeout(() => { t.className = "toast"; }, ms);
 }
 
 /* ---------- API ---------- */
@@ -557,6 +586,7 @@ async function loadStatus() {
   const statePill = $("state-pill");
   statePill.textContent = running ? "Trading" : (s.state || "unknown");
   statePill.className = "pill " + (running ? "pill-ok" : "pill-off");
+  renderBotControls(s);
 
   const cur = s.stake_currency || "";
   $("s-balance").textContent = money(s.current_balance, cur);
@@ -920,12 +950,85 @@ async function runPlugin(name, label, btn) {
   }
 }
 
-async function botControl(action, label) {
+/* ==========================================================================
+   Bot controls
+   ==========================================================================
+
+   Freqtrade has three states, and the difference between the last two is the
+   one that costs money to get wrong:
+
+     RUNNING  - looking for new trades, managing open ones
+     PAUSED   - NOT looking for new trades, still managing open ones
+     STOPPED  - neither: open positions are no longer watched
+
+   "Stop" is the action a beginner reaches for when they mean "stop buying",
+   and it is not that. A position left open with the bot stopped keeps its
+   exchange-side stoploss but loses the trailing stop and the profit target, so
+   it can drift down to the stoploss instead of being sold on the way up.
+
+   So the buttons are chosen from the real state, and Stop asks first and says
+   what it will do. Pause is offered as the safe alternative in the same
+   sentence, because that is usually the action actually wanted.
+*/
+
+function renderBotControls(s) {
+  const box = $("bot-controls");
+  const help = $("bot-control-help");
+  if (!box) return;
+  clear(box);
+
+  const state = String(s.state || "").toLowerCase();
+  const open = Number(s.open_trades || 0);
+
+  function add(label, action, cls, confirmText) {
+    const b = el("button", "btn btn-sm" + (cls ? " " + cls : ""), label);
+    b.onclick = () => botControl(action, label, confirmText);
+    box.appendChild(b);
+  }
+
+  if (state === "running") {
+    add("Pause trading", "pause");
+    add("Stop the bot", "stop", "btn-danger",
+        open
+          ? "Stop the bot?\n\nYou have " + open + " open trade" + (open === 1 ? "" : "s") +
+            ". Stopping means the bot stops managing " + (open === 1 ? "it" : "them") +
+            ": the trailing stop and profit target are no longer watched, though a " +
+            "stoploss held at the exchange still applies.\n\n" +
+            "If you only want it to stop buying, choose Cancel and press " +
+            "\"Pause trading\" instead."
+          : "Stop the bot? It will stop trading until you start it again.");
+    help.textContent = "Trading is active. Pause stops new buys but keeps managing " +
+      "what is open; Stop ends both.";
+  } else if (state === "paused") {
+    add("Resume trading", "start");
+    add("Stop the bot", "stop", "btn-danger",
+        "Stop the bot?\n\nYou have " + open + " open trade" + (open === 1 ? "" : "s") +
+        ". Stopping means the bot stops managing " + (open === 1 ? "it" : "them") + ".");
+    help.textContent = "Paused: no new trades are being opened, and anything open " +
+      "is still managed.";
+  } else {
+    // STOPPED, or a state we do not recognise. Starting is the only safe offer;
+    // pausing something already not running means nothing.
+    add("Start trading", "start");
+    help.textContent = open
+      ? "The bot is not running, and you have " + open + " open trade" +
+        (open === 1 ? "" : "s") + " that nothing is managing. Starting will resume " +
+        "managing " + (open === 1 ? "it" : "them") + "."
+      : "The bot is not running, so it is not looking for trades. Nothing is at " +
+        "risk while it is stopped.";
+  }
+}
+
+async function botControl(action, label, confirmText) {
+  if (confirmText && !window.confirm(confirmText)) return;
   try {
-    const r = await api("/api/v1/command", {
-      method: "POST", body: { command: action === "pause" ? "pause trading" : "resume trading" },
+    const r = await api("/api/v1/bot/control", {
+      method: "POST", body: { action: action },
     });
-    toast(r.message || label + " done.", "ok");
+    // The backend explains the consequence in its own words - it knows the open
+    // trade count and whether a stoploss is held at the exchange - so show that
+    // rather than a generic "done".
+    toast((r && r.message) || label + " done.", action === "stop" ? "warn" : "ok");
     await loadStatus();
   } catch (e) {
     if (e.auth) return signOut(e.message);
@@ -1256,8 +1359,6 @@ $("refresh-btn").onclick = () => { refreshAll(false); toast("Refreshed."); };
 $("digest-btn").onclick = () => loadDigest(true);
 $("send-btn").onclick = () => send($("chat-in").value);
 $("chat-in").addEventListener("keydown", e => { if (e.key === "Enter") send($("chat-in").value); });
-$("pause-btn").onclick = () => botControl("pause", "Trading paused");
-$("resume-btn").onclick = () => botControl("resume", "Trading resumed");
 $("gen-btn").onclick = e => runPlugin("strategy_generator", "Strategy generation", e.target);
 $("analysis-btn").onclick = e => runPlugin("market_analyst", "Market analysis", e.target);
 

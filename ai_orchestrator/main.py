@@ -433,6 +433,21 @@ class WhitelistRequest(BaseModel):
     pairs: list[str]
 
 
+class BotControlRequest(BaseModel):
+    """Start, pause or stop the running bot.
+
+    A closed set of three actions rather than a free-text command. The
+    natural-language path already understands "pause trading", but it goes
+    through intent parsing, and an operator pressing a button labelled Stop is
+    entitled to have exactly that happen rather than whatever the parser made
+    of the sentence it generated.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: str
+
+
 class SettingsRequest(BaseModel):
     """A change the operator is making deliberately.
 
@@ -1257,6 +1272,132 @@ async def restrict_pairs(
         return await freqtrade_client.set_whitelist(request.pairs)
     except UnsupportedOperation as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+#: The three things an operator may do to the running bot. A closed set, so an
+#: unrecognised action is refused rather than passed to freqtrade.
+BOT_CONTROL_ACTIONS: Dict[str, str] = {
+    "start": "Start trading (the bot looks for new trades again)",
+    "pause": "Pause trading (open trades are still managed)",
+    "stop": "Stop the bot (it stops managing open trades too)",
+}
+
+
+@app.post("/api/v1/bot/control")
+async def bot_control(
+    request: BotControlRequest, user: str = Depends(require_api_token)
+):
+    """Start, pause or stop the bot, and say plainly what that did.
+
+    The distinction between pause and stop is the whole reason this endpoint
+    explains itself. Freqtrade's /stop takes the bot out of its trading loop:
+    open positions are no longer managed, so a trailing stop stops trailing and
+    the ROI exit stops being evaluated. /pause only stops new entries.
+
+    An operator who does not know that difference will reach for "stop" when
+    they mean "stop buying", and quietly stop managing a position that is
+    already open. The response spells the consequence out rather than returning
+    a bare status code, and the audit log records who did it.
+    """
+    if not freqtrade_client:
+        raise HTTPException(status_code=503, detail="Freqtrade client not initialized")
+
+    action = (request.action or "").strip().lower()
+    if action not in BOT_CONTROL_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "'%s' is not something this interface can do to the bot. The "
+                "choices are: %s." % (request.action, ", ".join(sorted(BOT_CONTROL_ACTIONS)))
+            ),
+        )
+
+    actor = resolve_operator_name(user)
+
+    # How many positions would stop being managed. Read before the action, and
+    # failure to read is not fatal - it only changes the wording of the reply.
+    open_trades = 0
+    try:
+        status = await freqtrade_client.status()
+        open_trades = int(getattr(status, "open_trades_count", 0) or 0)
+    except (FreqtradeAPIError, TypeError, ValueError):
+        pass
+
+    try:
+        if action == "start":
+            result = await freqtrade_client.start()
+        elif action == "pause":
+            result = await freqtrade_client.pause()
+        else:
+            result = await freqtrade_client.stop()
+    except FreqtradeAPIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if action == "stop":
+        if open_trades:
+            message = (
+                "Bot stopped. You have %d open trade%s, and the bot has stopped "
+                "managing %s. A stoploss held at the exchange still protects "
+                "%s, but the trailing stop and the profit target are no longer "
+                "being watched. Pause instead if you only wanted it to stop "
+                "buying."
+                % (
+                    open_trades,
+                    "" if open_trades == 1 else "s",
+                    "it" if open_trades == 1 else "them",
+                    "it" if open_trades == 1 else "them",
+                )
+            )
+        else:
+            message = "Bot stopped. It is not trading and has no open positions."
+    elif action == "pause":
+        message = (
+            "Trading paused. No new trades will be opened. "
+            + (
+                "Your %d open trade%s still being managed normally." % (
+                    open_trades, " is" if open_trades == 1 else "s are"
+                )
+                if open_trades
+                else "There were no open trades."
+            )
+        )
+    else:
+        message = "Bot started. It will look for new trades on the next candle."
+
+    await _record_bot_control(actor, action, open_trades)
+
+    return {
+        "action": action,
+        "description": BOT_CONTROL_ACTIONS[action],
+        "message": message,
+        "open_trades_at_time_of_action": open_trades,
+        "result": result,
+    }
+
+
+async def _record_bot_control(actor: str, action: str, open_trades: int) -> None:
+    """Audit a bot control action, without letting an audit failure undo it.
+
+    Same reasoning as the settings path: refusing to pause the bot because the
+    audit log is unavailable is the wrong direction to fail in.
+    """
+    if audit_logger is None:
+        logger.error("Bot control '%s' by %s was NOT audited (logger unavailable)", action, actor)
+        return
+
+    try:
+        await audit_logger.log_config_change(
+            plugin="operator_bot_control",
+            config_changes={"bot_state": action},
+            reasoning=(
+                "Operator used the control panel to %s the bot%s."
+                % (action, "" if not open_trades else " with %d open trade(s)" % open_trades)
+            ),
+            user_initiated=True,
+            approved_by=actor,
+        )
+    except Exception as e:  # noqa: BLE001 - an audit failure must not undo the action
+        logger.error("Failed to audit bot control '%s' by %s: %s", action, actor, e)
 
 
 if __name__ == "__main__":

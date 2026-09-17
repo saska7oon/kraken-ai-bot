@@ -16,7 +16,12 @@ from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, Catego
 from freqtrade.strategy.interface import IStrategy
 from pandas import DataFrame
 import talib.abstract as ta
-import freqtrade.vendor.qtpylib.indicators as qtpylib
+# `technical` is where qtpylib's indicators actually live. Importing them via
+# freqtrade.vendor.qtpylib.indicators still works but emits a FutureWarning on
+# every startup, because that module is now only a re-export shim and is
+# scheduled for removal. Importing from the source means no warning now and no
+# breakage when the shim goes away.
+from technical import qtpylib
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 

@@ -99,6 +99,14 @@ jobs:
       - name: Pair-list safety rules
         run: python3 ai_orchestrator/tests/test_pair_safety.py
 
+      # Runs the page's own renderBotControls() against a stub DOM, so the
+      # question "does a running bot also offer Start?" is answered by executing
+      # the function rather than by pattern-matching its source. Node ships on
+      # the runner; the test skips with a clear message if it is ever absent
+      # rather than becoming a reason the build cannot run.
+      - name: Bot control panel offers only sensible actions
+        run: python3 ai_orchestrator/tests/test_bot_controls.py
+
       - name: Strategy naming
         run: python3 ai_orchestrator/tests/test_strategy_naming.py
 
