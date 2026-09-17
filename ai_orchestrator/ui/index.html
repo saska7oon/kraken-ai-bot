@@ -241,6 +241,13 @@ header{
 .changes{list-style:none;font-family:var(--mono);font-size:12.5px;margin-bottom:12px}
 .changes li{padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);color:var(--text-2)}
 .changes li:last-child{border-bottom:none}
+/* Query answers rendered into a chat bubble. Scoped under .rows because the
+   .k/.v rules above are scoped to .stat and would not reach here. */
+.rows{margin-top:10px;font-size:13px}
+.rows .row{display:flex;justify-content:space-between;gap:14px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.rows .row:last-child{border-bottom:none}
+.rows .k{color:var(--text-2)}
+.rows .v{font-family:var(--mono);color:var(--text)}
 
 /* ---------- trades ---------- */
 .trade{display:flex;align-items:flex-start;gap:12px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:13.5px}
@@ -871,6 +878,118 @@ function addTyping() {
   return t;
 }
 
+/*
+  Query answers come back under result.executed[].data.
+
+  Both the shape and the field names here are load-bearing: the server returns
+  {"status": "applied", "intent": ..., "changes": [...], "result": {"executed":
+  [{"change": {...}, "status": "success", "data": {...}}]}}. This function used
+  to not exist, so every question the operator asked was answered correctly by
+  the server and then never displayed - the chat fell through to its
+  "I understood that as: <intent>" placeholder even though the data was sitting
+  right there in the response.
+
+  Returns true if it rendered anything, so the caller knows whether a fallback
+  message would be repeating what is already on screen.
+*/
+function renderQueryResults(bubble, r) {
+  const executed = (r && r.result && Array.isArray(r.result.executed))
+    ? r.result.executed : [];
+  let shown = false;
+
+  executed.forEach(item => {
+    if (!item || typeof item !== "object") return;
+    const data = item.data;
+
+    // A failed query carries an error instead of data. Show that too - a
+    // silent failure is the bug being fixed here, and swallowing the error
+    // while rendering the successes would recreate it for one branch.
+    if (!data || typeof data !== "object") {
+      if (item.error) {
+        bubble.appendChild(el("div", "v down", String(item.error)));
+        shown = true;
+      }
+      return;
+    }
+
+    const rows = [];
+    if (data.state !== undefined) {
+      const running = String(data.state).toLowerCase() === "running";
+      rows.push(["State", running ? "Trading" : String(data.state), ""]);
+    }
+    if (data.dry_run !== undefined) {
+      rows.push(["Mode", data.dry_run ? "Dry run \u2014 no real money"
+                                      : "LIVE \u2014 real money",
+                 data.dry_run ? "" : "down"]);
+    }
+    if (data.open_trades !== undefined) {
+      rows.push(["Open trades",
+        data.open_trades + (data.max_open_trades !== undefined
+          ? " of " + data.max_open_trades : ""), ""]);
+    }
+    if (data.current_balance !== undefined) {
+      rows.push(["Balance", money(data.current_balance), ""]);
+    }
+    if (data.profit_pct !== undefined) {
+      const p = Number(data.profit_pct);
+      rows.push(["Profit", pct(p), isNaN(p) ? "" : (p >= 0 ? "up" : "down")]);
+    }
+
+    if (!rows.length) return;
+    const dl = el("div", "rows");
+    rows.forEach(([label, value, cls]) => {
+      const row = el("div", "row");
+      row.appendChild(el("span", "k", label));
+      row.appendChild(el("span", "v " + (cls || ""), value));
+      dl.appendChild(row);
+    });
+    bubble.appendChild(dl);
+    shown = true;
+  });
+
+  return shown;
+}
+
+/*
+  A refused plugin run, made actionable.
+
+  Asking "what are the market conditions?" is routed to the market_analyst
+  plugin, and that request is correctly refused: a plugin run must never be
+  something an approval can trigger, because that would turn "approve the
+  message you were shown" into "run anything". So the refusal is right.
+
+  What was wrong is who it was addressed to. The operator asked a plain-English
+  question and got back an instruction to send a POST request with a JSON body -
+  accurate, and useless to someone who does not write HTTP by hand. This app
+  already has a button that calls exactly that endpoint, so the refusal offers
+  it. Nothing about the safety rule changes: the run still goes through the
+  authenticated, audited plugin endpoint, and still cannot be reached by
+  approving anything.
+*/
+const PLUGIN_LABELS = {
+  market_analyst: "Market analysis",
+  param_optimizer: "Parameter optimization",
+  strategy_generator: "Strategy generation"
+};
+
+function renderRefusedPluginActions(bubble, r) {
+  const refused = Array.isArray(r.refused_changes) ? r.refused_changes : [];
+  const triggers = refused.filter(c => c && typeof c === "object" &&
+    c.type === "trigger" && typeof c.action === "string");
+  if (!triggers.length) return false;
+
+  triggers.forEach(c => {
+    const name = c.action;
+    const label = PLUGIN_LABELS[name] || name.replace(/_/g, " ");
+    const box = el("div", "prop-actions");
+    const b = el("button", "btn btn-sm btn-primary", "Run " + label + " now");
+    b.onclick = () => runPlugin(name, label, b);
+    box.appendChild(b);
+    bubble.appendChild(box);
+  });
+  return true;
+}
+
 async function send(text) {
   text = (text || "").trim();
   if (!text || busy) return;
@@ -884,13 +1003,29 @@ async function send(text) {
     const r = await api("/api/v1/command", { method: "POST", body: { command: text } });
     typing.remove();
 
-    let reply = r.message || "";
-    if (!reply) {
-      if (r.status === "pending_approval") reply = "I can't apply that myself \u2014 it needs your approval.";
-      else if (r.status === "executed") reply = "Done.";
-      else reply = "I understood that as: " + (r.intent || "something I couldn't classify") + ".";
+    const bubble = addMsg("", "msg-bot");
+
+    // Render the answer first: a query's payload lives in result.executed[],
+    // which no code path here read. That is why asking for status did nothing.
+    const answered = renderQueryResults(bubble, r);
+
+    if (r.message) {
+      bubble.appendChild(el("div", null, r.message));
+    } else if (!answered) {
+      // Report what actually happened. The old branch tested for "executed",
+      // but the server sends "applied" - a comparison that never matched, so
+      // even a successful change was reported as "I understood that as: ...".
+      if (r.status === "pending_approval") {
+        bubble.appendChild(el("div", null,
+          "I can't apply that myself \u2014 it needs your approval."));
+      } else if (r.status === "applied") {
+        bubble.appendChild(el("div", null, "Done."));
+      } else {
+        bubble.appendChild(el("div", null,
+          "I read that as " + (r.intent || "something I couldn't classify") +
+          ", but there is nothing to show for it."));
+      }
     }
-    const bubble = addMsg(reply, "msg-bot");
 
     // Show the proposed values inline so the operator can read them without
     // hunting through a JSON response.
@@ -904,6 +1039,10 @@ async function send(text) {
       });
       bubble.appendChild(ul);
     }
+
+    // A refused plugin run gets a button, so the operator does not have to
+    // translate the server's HTTP instructions into an actual request.
+    renderRefusedPluginActions(bubble, r);
 
     if (r.status === "pending_approval" && r.proposal_id) {
       const actions = el("div", "prop-actions");

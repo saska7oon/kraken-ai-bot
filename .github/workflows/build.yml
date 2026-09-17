@@ -128,6 +128,13 @@ jobs:
       - name: Bot control panel offers only sensible actions
         run: python3 ai_orchestrator/tests/test_bot_controls.py
 
+      # This one runs the real send() against a stub DOM rather than calling the
+      # renderer directly. The first version of it did the latter and passed even
+      # with the fix reverted, because what was missing was the call site - a
+      # renderer that nothing calls is precisely the bug being guarded.
+      - name: The chat displays what the server returns
+        run: python3 ai_orchestrator/tests/test_chat_rendering.py
+
       - name: Strategy naming
         run: python3 ai_orchestrator/tests/test_strategy_naming.py
 

@@ -448,9 +448,20 @@ class NLConfigPlugin(BasePlugin):
             ],
             "show_status": [
                 r"(show|display|get|what).*(status|performance|trades|profit|balance)",
+                r"how('s| is| are)\s+(things|it|everything)\s*(going|doing)?",
+            ],
+            # Deliberately separate from show_status: this asks about the coins,
+            # not the account. When it was missing entirely, the fallback had no
+            # way to express "how are the markets?" at all.
+            "market_analysis": [
+                r"(market|markets|conditions|sentiment|volatility).*(condition|doing|look|analysis|now)?",
+                r"what('s| is| are).*(market|btc|eth|sol|xrp|bitcoin|ethereum|doing|happening)",
             ],
             "explain_trade": [
-                r"(why|explain|reason).*(bought|sold|trade|entry|exit)",
+                # "sold" alone missed "why did it sell ETH?" - the most natural
+                # way to ask. Both tenses are listed now.
+                r"(why|explain|reason).*(bought|buy|sold|sell|selling|"
+                r"trade|entry|exit|close|closed)",
             ],
         }
 
@@ -624,17 +635,27 @@ AVAILABLE INTENTS:
 4. change_position_size - Adjust stake amount / max open trades
 5. pause_resume - Pause or resume trading
 6. change_strategy - Switch strategy
-7. show_status - Show bot status/performance
+7. show_status - Questions about THIS ACCOUNT: balance, profit, open trades,
+   whether the bot is running or paused, how things are going overall
 8. explain_trade - Explain a specific trade decision
 9. optimize_params - Trigger parameter optimization
 10. generate_strategy - Request new strategy generation
-11. market_analysis - Request market analysis
+11. market_analysis - Questions about THE MARKET: prices, trends, volatility,
+    what the coins are doing, market conditions, whether now is a good time
+
+show_status and market_analysis are different questions and must not be
+confused. show_status is about the operator's own money and the bot's state.
+market_analysis is about the coins themselves. "How's things going?" and
+"what's my balance?" are show_status. "What are the market conditions?",
+"how are the markets?", and "what's BTC doing?" are market_analysis.
 
 Return JSON with: intent, parameters, confidence (0-1), original_text.
 
 Examples:
 "make it more conservative" -> {{"intent": "change_risk", "parameters": {{"risk_level": "conservative"}}, "confidence": 0.9}}
-"why did it sell ETH?" -> {{"intent": "explain_trade", "parameters": {{"pair": "ETH/CAD", "side": "sell"}}, "confidence": 0.9}}"""
+"why did it sell ETH?" -> {{"intent": "explain_trade", "parameters": {{"pair": "ETH/CAD", "side": "sell"}}, "confidence": 0.9}}
+"how's things going?" -> {{"intent": "show_status", "parameters": {{}}, "confidence": 0.9}}
+"what are the market conditions?" -> {{"intent": "market_analysis", "parameters": {{}}, "confidence": 0.9}}"""
 
         messages = [
             {
