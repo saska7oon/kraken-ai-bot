@@ -106,6 +106,14 @@ jobs:
       - name: Pair-list safety rules
         run: python3 ai_orchestrator/tests/test_pair_safety.py
 
+      # The static rules above check the SHAPE of a pair (quote currency, not a
+      # leveraged token). They cannot know whether the market exists, which is
+      # how ADA/CAD reached a live whitelist: Kraken's /convert page shows a
+      # converted price and is not an order book. This asks the exchange.
+      # Skips loudly if Kraken is unreachable rather than passing silently.
+      - name: Configured pairs are real Kraken markets
+        run: python3 tools/check_pairs_against_kraken.py
+
       # Runs the shipped strategy against a real DataFrame. This is the check
       # that would have caught the entry-signal crash before it reached a live
       # bot; static validation cannot see a runtime type error.

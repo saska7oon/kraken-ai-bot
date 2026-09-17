@@ -501,8 +501,7 @@ Focus on:
 2. Mean-reversion for ranging markets
 3. Volatility-adjusted position sizing
 4. Canadian market hours considerations
-5. Kraken-specific pair characteristics (BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD,
-   ADA/CAD)"""
+5. Kraken-specific pair characteristics (BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD)"""
 
     @staticmethod
     def _format_current_strategies(current_strategies: List[Dict[str, Any]]) -> str:
