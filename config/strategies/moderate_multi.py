@@ -2,7 +2,7 @@
 Moderate Multi-Pair Strategy for Kraken Canada (CAD Markets)
 
 Designed for $1000 CAD starting capital, moderate risk profile.
-Trades: BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD
+Trades: BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD, ADA/CAD
 
 Strategy Logic:
 - Trend following with EMA crossover (9/21) + RSI filter

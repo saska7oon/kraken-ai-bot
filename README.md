@@ -15,7 +15,7 @@
 | **AI Orchestration** | Custom Python service via OpenRouter |
 | **AI Model** | `nvidia/nemotron-3-ultra-550b-a55b:free` (configurable) |
 | **Stake Currency** | CAD (native, tax-friendly) |
-| **Pairs** | BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD |
+| **Pairs** | BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD, ADA/CAD |
 | **Risk Profile** | Moderate (configurable: conservative/moderate/aggressive) |
 | **Security** | Docker secrets - **no credentials on disk** |
 | **UI** | FreqUI (port 8081, Basic Auth) |

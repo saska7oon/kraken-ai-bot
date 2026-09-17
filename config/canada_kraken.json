@@ -25,12 +25,24 @@
             "rateLimit": 3500
         },
 
-        // The four CAD spot markets in scope.
+        // The CAD spot markets in scope.
+        //
+        // Note what a whitelist entry does NOT do: it does not give the bot
+        // access to coins you already hold. Freqtrade trades only positions it
+        // opened itself, and an exit sells trade.amount - the amount it bought,
+        // not the wallet balance. Its one reconciliation against the wallet
+        // (freqtradebot.py, the `total > trade.amount * 0.98` branch) can only
+        // revise an amount DOWNWARD, so a large pre-existing holding is never
+        // swept into a trade and never sold by the bot.
+        //
+        // Adding ADA here therefore means "the bot may open its own ADA/CAD
+        // trade with CAD", not "the bot may trade your ADA".
         "pair_whitelist": [
             "BTC/CAD",
             "ETH/CAD",
             "SOL/CAD",
-            "XRP/CAD"
+            "XRP/CAD",
+            "ADA/CAD"
         ],
 
         // Excluded deliberately.

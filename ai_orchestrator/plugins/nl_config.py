@@ -613,7 +613,7 @@ COMMAND: "{text}"
 
 CONTEXT:
 - Bot: Freqtrade on Kraken Canada (CAD markets)
-- Pairs: BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD
+- Pairs: BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD, ADA/CAD
 - Current: dry-run (simulation), 1000 CAD, moderate risk
 - Strategy: ModerateMultiPairStrategy
 
