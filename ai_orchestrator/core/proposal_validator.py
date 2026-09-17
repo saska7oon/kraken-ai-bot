@@ -55,7 +55,7 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import FrozenSet, Any, Dict, List, Optional, Sequence, Tuple
 
 __all__ = [
     "ValidationIssue",
@@ -74,6 +74,24 @@ __all__ = [
 # --------------------------------------------------------------------------
 
 REQUIRED_INTERFACE_VERSION = 3
+
+#: Circuit breakers every generated strategy must define.
+#:
+#: Freqtrade 2026.x moved protections out of the config (it now rejects a
+#: 'protections' key there entirely) and onto the strategy as a @property. That
+#: change created a silent hole in exactly the place a novice is most exposed:
+#: a strategy could pass every other check, backtest well, and have NO safety
+#: net at all, because nothing required one. These three are what stop a losing
+#: streak from compounding:
+#:
+#:   MaxDrawdown    - halts trading when equity falls too far from its peak
+#:   StoplossGuard  - halts a pair after repeated stop-loss hits
+#:   CooldownPeriod - forces a pause after a stop loss
+REQUIRED_PROTECTIONS: Tuple[str, ...] = (
+    "MaxDrawdown",
+    "StoplossGuard",
+    "CooldownPeriod",
+)
 
 REQUIRED_METHODS: Tuple[str, ...] = (
     "populate_indicators",
@@ -119,6 +137,84 @@ FORBIDDEN_CALLS: Tuple[str, ...] = (
     "locals",
     "breakpoint",
     "input",
+)
+
+#: ---------------------------------------------------------------------------
+#: ALLOWLIST - the actual security boundary.
+#: ---------------------------------------------------------------------------
+#: Everything above this point is a BLACKLIST, and blacklists lose. The
+#: following four payloads were verified to pass this validator with zero
+#: errors, because each one computes a forbidden name at runtime so it never
+#: appears literally in the source:
+#:
+#:     getattr(__builtins__, "ev" + "al")                # eval, never spelled
+#:     builtins.__dict__["__imp" + "ort__"]("os")        # __import__, never spelled
+#:     open("".join(chr(c) for c in [47, 114, 117, 110]))
+#:     getattr(object, "__subcl" + "asses__")()
+#:
+#: Pair that with the fact that a generated strategy is written into the very
+#: directory Freqtrade imports from, and a validator bypass is remote code
+#: execution inside the container holding the Kraken API key.
+#:
+#: So the rule is inverted here: rather than enumerating what is forbidden, we
+#: enumerate what a trading strategy may legitimately use and reject the rest.
+#: That is a far stronger guarantee, and for this domain it is affordable - the
+#: deployed strategy needs only the five roots below.
+ALLOWED_IMPORT_ROOTS: FrozenSet[str] = frozenset(
+    {
+        # The strategy API itself, including freqtrade.vendor.
+        "freqtrade",
+        # Dataframe and numerical work, which is what indicators are built from.
+        "pandas",
+        "numpy",
+        # Indicator libraries.
+        "talib",
+        "technical",
+        # Standard-library types and helpers with no capability to escape.
+        "typing",
+        "datetime",
+        "math",
+        "statistics",
+        "decimal",
+        "functools",
+        "itertools",
+        "collections",
+        "dataclasses",
+        "enum",
+        "warnings",
+        "logging",
+    }
+)
+
+#: Bare names that must never be *referenced*, even as a value.
+#: ``getattr`` is the important one: it is the runtime name-resolution primitive
+#: that turns any string into a callable, which is how every one of the four
+#: payloads above reaches forbidden functionality without naming it.
+#: ``open`` is here rather than relying on the mode check in ``_check_open_call``,
+#: because that check only inspects the mode argument and never the path.
+FORBIDDEN_NAMES: Tuple[str, ...] = (
+    "getattr",
+    "setattr",
+    "delattr",
+    "vars",
+    "globals",
+    "locals",
+    "eval",
+    "exec",
+    "compile",
+    "open",
+    "chr",
+    "ord",
+    "input",
+    "breakpoint",
+    "memoryview",
+    "builtins",
+    "importlib",
+    "__import__",
+    "__builtins__",
+    "exit",
+    "quit",
+    "help",
 )
 
 #: Modules whose mere *use* (e.g. ``requests.get``) indicates network access.
@@ -643,6 +739,7 @@ class _Analyzer:
             self._check_position_adjustment()
             self._check_can_short()
             self._check_leverage()
+            self._check_protections()
             self._check_custom_stoploss()
             self._check_trailing_stop()
             self._check_process_only_new_candles()
@@ -651,6 +748,9 @@ class _Analyzer:
             self._check_duplicate_attributes()
             self._check_margin()
             self._check_pair_attributes()
+            self._check_import_allowlist()
+            self._check_no_double_underscores()
+            self._check_forbidden_names()
             self._scan_calls_and_attributes()
             self._scan_string_literals()
             self._check_secret_access()
@@ -1446,6 +1546,84 @@ class _Analyzer:
                 self._line_of(node),
             )
 
+    def _check_protections(self) -> None:
+        """Require the strategy to define real trade protections.
+
+        This closes a hole created by Freqtrade 2026.x moving protections from
+        the config onto the strategy. Nothing checked for them, so a generated
+        strategy could pass every other test, backtest well, and still have no
+        circuit breaker of any kind - the operationally dangerous case, because
+        it looks perfectly healthy right up until a bad streak empties the
+        account.
+
+        The property must be statically readable. A protections list that is
+        computed at runtime cannot be verified here, and "cannot be verified"
+        must never be treated as "fine".
+        """
+        if self.strategy_class is None:
+            return
+
+        prop: Optional[ast.FunctionDef] = None
+        for node in self.strategy_class.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "protections":
+                decorators = {ast.unparse(d).split(".")[-1] for d in node.decorator_list}
+                if "property" in decorators:
+                    prop = node  # type: ignore[assignment]
+                break
+
+        if prop is None:
+            self.error(
+                "protections_missing",
+                "This strategy defines no trade protections. Protections are the "
+                "automatic circuit breakers that pause trading when things go wrong "
+                "- for example after a run of losses. Without them a bad streak can "
+                "keep compounding with nothing to stop it. In Freqtrade these must be "
+                "declared as a 'protections' property on the strategy class."
+                f" At minimum, {', '.join(REQUIRED_PROTECTIONS)} should be present.",
+                self._line_of(self.strategy_class),
+            )
+            return
+
+        value: Any = None
+        literal_ok = False
+        for stmt in ast.walk(prop):
+            if isinstance(stmt, ast.Return) and stmt.value is not None:
+                try:
+                    value = ast.literal_eval(stmt.value)
+                    literal_ok = True
+                except (ValueError, SyntaxError, TypeError):
+                    literal_ok = False
+                break
+
+        if not literal_ok or not isinstance(value, list):
+            self.error(
+                "protections_not_readable",
+                "This strategy's protections are built by code rather than written "
+                "out as a plain list, so their contents cannot be checked. Because "
+                "these are the settings that limit losses, an unreadable definition "
+                "must not be approved - write them as a plain list of settings.",
+                self._line_of(prop),
+            )
+            return
+
+        methods = {
+            str(entry.get("method"))
+            for entry in value
+            if isinstance(entry, dict) and entry.get("method")
+        }
+        self.facts["protections"] = sorted(methods)
+
+        missing = [name for name in REQUIRED_PROTECTIONS if name not in methods]
+        if missing:
+            self.error(
+                "protections_incomplete",
+                f"This strategy is missing {', '.join(missing)} from its protections. "
+                f"Those circuit breakers are what pause trading after losses pile up; "
+                f"without them a losing streak has nothing to stop it. Found: "
+                f"{', '.join(sorted(methods)) or 'none'}.",
+                self._line_of(prop),
+            )
+
     def _check_custom_stoploss(self) -> None:
         if self.strategy_class is None:
             return
@@ -1458,13 +1636,15 @@ class _Analyzer:
         self.facts["has_custom_stoploss"] = bool(uses or has_method)
 
         if ok and value is True:
-            self.warn(
+            self.error(
                 "custom_stoploss_enabled",
-                "This strategy replaces the normal safety net with its own custom "
-                "version. That means the simple stop loss number is no longer what "
-                "protects you -- a piece of code decides instead, and it is much "
-                "harder for anyone (including this checker) to say in advance how much "
-                "a bad trade could lose.",
+                "This strategy replaces the normal stop loss with its own custom "
+                "code. The simple stop loss number then no longer limits how much a "
+                "trade can lose - a piece of code decides instead, and nothing here "
+                "can say in advance what it will return. A custom stop loss can "
+                "legitimately return a loss far larger than the configured limit. "
+                "Because a generated strategy cannot be relied on to get this right, "
+                "it must use a plain numeric stop loss instead.",
                 self._line_of(node),  # type: ignore[arg-type]
             )
         if value is True and not has_method:
@@ -1765,6 +1945,140 @@ class _Analyzer:
                 "on a position you already hold. This must be fixed.",
                 self._line_of(node),
             )
+
+    # ----------------------------------------------------------------- allowlist
+    def _check_import_allowlist(self) -> None:
+        """Reject every import whose root module is not on the allowlist.
+
+        This is the load-bearing check. ``import builtins`` looked harmless to
+        the old blacklist, yet it is enough to reach the import machinery:
+
+            builtins.__dict__["__imp" + "ort__"]("os").system("...")
+
+        Because we allow only what a strategy provably needs, every route like
+        that is closed by construction rather than by enumeration.
+        """
+        assert self.tree is not None
+        allowed = ", ".join(sorted(ALLOWED_IMPORT_ROOTS))
+
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = _module_root(alias.name)
+                    if root not in ALLOWED_IMPORT_ROOTS:
+                        self.error(
+                            "import_not_allowed",
+                            f"This strategy imports '{alias.name}', which is not on "
+                            f"the list of libraries a trading strategy may use. "
+                            f"Allowed libraries are: {allowed}. If a strategy needs "
+                            f"something outside that list, it is doing work that "
+                            f"belongs outside a strategy.",
+                            self._line_of(node),
+                        )
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    self.error(
+                        "relative_import",
+                        "This strategy uses a relative import, which means it is "
+                        "reaching for another file on the computer rather than a "
+                        "normal library. Strategies must be self-contained.",
+                        self._line_of(node),
+                    )
+                    continue
+                root = _module_root(_strip_relative(node.module or ""))
+                if root not in ALLOWED_IMPORT_ROOTS:
+                    self.error(
+                        "import_not_allowed",
+                        f"This strategy imports from '{node.module}', which is not on "
+                        f"the list of libraries a trading strategy may use. "
+                        f"Allowed libraries are: {allowed}.",
+                        self._line_of(node),
+                    )
+
+    def _check_no_double_underscores(self) -> None:
+        """Reject double underscores in names, attributes and string literals.
+
+        Python's ``__x__`` names are the standard route out of any restricted
+        environment: ``__builtins__`` gives the builtin namespace,
+        ``__subclasses__`` enumerates every loaded class, ``__globals__`` leaks
+        module state, ``__import__`` is the import machinery itself.
+
+        The old checker only inspected ``ast.Attribute`` nodes, so the same names
+        written as *strings* passed untouched - which is precisely how
+        ``"__imp" + "ort__"`` and ``"__subcl" + "asses__"`` got through.
+
+        A real trading strategy has no need for a double underscore anywhere.
+        The deployed strategy contains zero of them, so this rule costs nothing
+        legitimate and closes the whole family at once. Docstrings are exempt:
+        prose is not executable.
+        """
+        assert self.tree is not None
+
+        def reject(what: str, line: Optional[int]) -> None:
+            self.error(
+                "dunder_not_allowed",
+                f"This strategy uses {what} containing a double underscore. In "
+                f"Python, names like __builtins__ and __subclasses__ reach deep "
+                f"into the interpreter and are the usual way code escapes its "
+                f"sandbox. A trading strategy never needs one. This must be "
+                f"removed before approval.",
+                line,
+            )
+
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                # Docstrings are documentation; only executable strings matter.
+                if id(node) in self.docstring_ids:
+                    continue
+                if "__" in node.value:
+                    reject("text", self._line_of(node))
+            elif isinstance(node, ast.Attribute):
+                if "__" in node.attr:
+                    reject(f"'{node.attr}'", self._line_of(node))
+            elif isinstance(node, ast.Name):
+                if "__" in node.id:
+                    reject(f"'{node.id}'", self._line_of(node))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if "__" in node.name:
+                    reject(f"the definition '{node.name}'", self._line_of(node))
+            elif isinstance(node, ast.arg):
+                if "__" in node.arg:
+                    reject(f"the parameter '{node.arg}'", self._line_of(node))
+
+    def _check_forbidden_names(self) -> None:
+        """Reject references to capability-bearing builtins such as getattr/open.
+
+        ``getattr`` matters most: it converts any string into an attribute
+        lookup, so it defeats every name-based check in this file. Banning the
+        primitive is what makes the rest of the analysis meaningful.
+
+        Deliberately *not* banned here: ``object``, ``type`` and ``super``. They
+        are occasionally legitimate in strategy code, and the double-underscore
+        rule above already closes the routes that made them dangerous
+        (``getattr(object, "__subclasses__")`` needs both a forbidden name and a
+        forbidden string).
+        """
+        assert self.tree is not None
+        reported: set = set()
+
+        for node in ast.walk(self.tree):
+            if not isinstance(node, ast.Name):
+                continue
+            # An assignment target is the strategy naming its own variable, which
+            # is harmless; only *reading* the name reaches the builtin.
+            if isinstance(getattr(node, "ctx", None), ast.Store):
+                continue
+            if node.id in FORBIDDEN_NAMES and node.id not in reported:
+                reported.add(node.id)
+                self.error(
+                    "forbidden_name",
+                    f"This strategy uses '{node.id}', which can run or reach parts "
+                    f"of the computer that a trading strategy has no business "
+                    f"touching. Tools like this are how harmful code hides - it is "
+                    f"why the safety checker cannot simply look for the dangerous "
+                    f"word itself. This must be removed before approval.",
+                    self._line_of(node),
+                )
 
     def _check_dunder_usage(self) -> None:
         assert self.tree is not None

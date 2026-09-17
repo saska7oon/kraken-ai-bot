@@ -26,15 +26,63 @@ nothing surfaced.
 It also allowed ``dry_run`` to be treated as an ordinary config value. Switching
 a bot from simulation to real money is not an ordinary config change, and for a
 non-expert operator it is the single most dangerous action available.
+
+Security model
+--------------
+Every control in this file exists because of a specific way the previous code
+could be abused. They are listed here so that a future change does not quietly
+remove one of them.
+
+1. **Frozen keys.** ``dry_run`` and every credential path can never be proposed
+   or applied through this interface, at any confidence level. Keys are
+   normalised (stripped and lower-cased) before the check, because
+   ``"DRY_RUN"``, ``" dry_run"`` and ``"Dry_Run"`` all mean the same thing to a
+   human and must all be refused.
+
+2. **Bounds and an explicit allowlist.** A numeric setting is accepted only if
+   it is inside :data:`BOUNDS`, and a key that has no bounds is refused rather
+   than silently passed through. Booleans are rejected before anything else is
+   tried, because ``isinstance(True, int)`` is ``True`` in Python and ``True``
+   would otherwise be read as the number 1 - which is a legal value for some
+   settings. Non-finite numbers are rejected too, since ``float("nan")``
+   compares false against every bound and would slip through.
+
+3. **Proposal binding.** An approval must name a proposal *this process
+   created* (``proposal_id``) and apply exactly the change list that was stored
+   under it. The API no longer accepts a change list from the request body: the
+   operator approves a rendered message, so if the machine could apply a
+   different list the approval would be meaningless. Stored proposals are
+   single-use, expire after :data:`PROPOSAL_TTL_SECONDS`, are fingerprinted with
+   SHA-256, and are re-validated against controls 1 and 2 immediately before
+   they are applied. They live in memory only, so a restart discards them.
+
+4. **Audit before apply.** The intent, the full change list and its hash are
+   written to the audit log *before* the first change runs, each change is
+   isolated so one failure cannot skip the rest, and a completion entry is
+   always written - including when a change raises. The previous code audited
+   once, after the loop, so a change that raised half way through was applied
+   and never recorded.
+
+5. **No plugin runs from an approval.** A ``trigger`` change is refused. Plugin
+   runs have their own authenticated endpoint
+   (``POST /api/v1/plugins/{name}/control`` with ``action="run"``); letting an
+   "approval" start an arbitrary plugin turned the approval gate into a generic
+   command executor.
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import logging
+import math
 import re
+import secrets
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from ai_orchestrator.core.freqtrade_api import FreqtradeAPIError, UnsupportedOperation
 from ai_orchestrator.core.plugin_manager import BasePlugin, PluginConfig
@@ -105,6 +153,68 @@ RUNTIME_ACTIONS = {"pause_resume", "show_status", "explain_trade", "restrict_pai
 # Intents that only ever produce a proposal.
 PROPOSAL_INTENTS = {"change_risk", "change_stoploss", "change_position_size", "change_strategy"}
 
+# Settings whose value must be a whole number. Freqtrade accepts 3.0 for these
+# but writes it back as a float, and a non-expert reading "max_open_trades: 3.0"
+# cannot tell whether something odd happened. Integral floats are converted, and
+# 2.5 is refused rather than rounded - rounding a risk limit in either direction
+# silently changes how much money is at risk.
+INTEGER_KEYS = frozenset({"max_open_trades"})
+
+# -----------------------------------------------------------------------------
+# THE EXPLICIT ALLOWLIST OF PROPOSABLE SETTINGS
+# -----------------------------------------------------------------------------
+# A key with no entry here is refused outright. The old code only looked up
+# BOUNDS and, finding nothing, accepted the value unchecked - so an unknown or
+# misspelled key ("stoploss " with a trailing space, "unbounded_key") was
+# carried straight through to the operator as a "validated" proposal. Adding a
+# setting to this interface is now a deliberate edit to this set.
+PROPOSABLE_KEYS = frozenset(set(BOUNDS) | {"strategy"})
+
+# Change types an approval is allowed to carry out.
+#   proposal_only - a setting to put into the Swarm config out of band
+#   bot_control   - pause/resume over the Freqtrade REST API
+#   runtime_pairs - restrict the traded pairs over the Freqtrade REST API
+#   query         - read-only lookups
+#   note / clarification - text for the operator, no action
+APPROVABLE_CHANGE_TYPES = frozenset(
+    {"proposal_only", "bot_control", "runtime_pairs", "query", "note", "clarification"}
+)
+
+# Change types that must NEVER be carried out by an approval. Running a plugin
+# has its own authenticated endpoint; routing it through an approval made the
+# approval gate a generic "run any plugin" button.
+PLUGIN_RUN_CHANGE_TYPES = frozenset({"trigger"})
+
+BOT_CONTROL_ACTIONS = frozenset({"pause", "resume"})
+
+# A strategy name ends up in the Swarm config, so it must look like a Python
+# class name and nothing else - no paths, no spaces, no punctuation.
+_STRATEGY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# A trading pair such as BTC/CAD. Deliberately strict: this value is handed to
+# the bot's whitelist/blacklist machinery.
+_PAIR_RE = re.compile(r"^[A-Za-z0-9]{2,15}/[A-Za-z0-9]{2,15}$")
+
+# -----------------------------------------------------------------------------
+# PENDING PROPOSAL STORE
+# -----------------------------------------------------------------------------
+# How long an approval stays valid. Long enough for an operator to read the
+# proposal, look at their bot and decide; short enough that a proposal left open
+# on a screen overnight is not still actionable tomorrow morning.
+PROPOSAL_TTL_SECONDS = 30 * 60
+
+# The TTL can be tuned from the plugin config, but only inside these limits, so
+# a configuration mistake cannot create proposals that never expire.
+MIN_PROPOSAL_TTL_SECONDS = 60
+MAX_PROPOSAL_TTL_SECONDS = 60 * 60
+
+# An upper bound on stored proposals so a burst of commands cannot grow this
+# process's memory without limit. The oldest pending proposal is discarded (and
+# the discard is audited) to make room.
+MAX_PENDING_PROPOSALS = 25
+
+# An upper bound on the size of a single stored change list.
+MAX_CHANGES_PER_PROPOSAL = 25
+
 
 @dataclass
 class NLCommand:
@@ -115,6 +225,123 @@ class NLCommand:
     confidence: float
     original_text: str
     requires_approval: bool = True
+
+
+# =============================================================================
+# PROPOSAL PLUMBING
+# =============================================================================
+def _canonical_json(payload: Any) -> str:
+    """
+    Deterministic JSON, used for fingerprinting a change list.
+
+    Sorted keys and compact separators mean the same logical list always hashes
+    to the same value, whatever order a dictionary happened to be built in.
+    ``default=str`` keeps this from raising on an unusual value type - a
+    fingerprint that raises would be a way to make an approval unverifiable.
+    """
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _hash_changes(changes: Any) -> str:
+    """SHA-256 fingerprint of a change list."""
+    return hashlib.sha256(_canonical_json(changes).encode("utf-8")).hexdigest()
+
+
+def _fmt_percent(value: Any) -> str:
+    """
+    Render a ratio as a friendly percentage: -0.08 -> '8%'.
+
+    Never raises. The old code built the stop-loss description with an inline
+    f-string, so an LLM answer of ``{"value": "aggressive"}`` raised ValueError
+    while the description was being *formatted* - before validation could mark
+    the change invalid - and the operator saw an HTTP 500 instead of a refusal.
+    """
+    try:
+        text = f"{abs(float(value)) * 100:.2f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return "an unknown percentage"
+    if not text:
+        text = "0"
+    return f"{text}%"
+
+
+def _iso(timestamp: float) -> str:
+    """Epoch seconds as a UTC ISO-8601 string, for anything the operator reads."""
+    try:
+        return datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return "unknown"
+
+
+class ProposalError(Exception):
+    """
+    An approval could not be honoured.
+
+    Carries an HTTP status so the API layer does not have to guess, and a message
+    written for a non-expert operator. Every raise site has already recorded the
+    refusal in the audit log, so a refusal is never silent.
+    """
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+@dataclass
+class PendingProposal:
+    """
+    One change list waiting for the operator to approve or reject it.
+
+    Everything the approval decision needs is captured here at propose time, so
+    that approving cannot be influenced by whatever the caller sends later.
+    ``change_hash`` is the SHA-256 of the canonical JSON of ``changes`` and is
+    re-checked at approval time: if the stored list ever stopped matching its
+    fingerprint, the proposal is refused rather than applied.
+    """
+
+    proposal_id: str
+    created_at: float
+    expires_at: float
+    requested_by: str
+    user_id: str
+    intent: str
+    confidence: float
+    changes: List[Dict[str, Any]]
+    change_hash: str
+    command_text: str = ""
+    message: str = ""
+
+    def is_expired(self, now: Optional[float] = None) -> bool:
+        return (time.time() if now is None else now) >= self.expires_at
+
+    def seconds_remaining(self) -> int:
+        return max(0, int(self.expires_at - time.time()))
+
+    def public_dict(self) -> Dict[str, Any]:
+        """
+        The operator-facing view of this proposal.
+
+        Includes the change list, because the whole point of the endpoint is that
+        the operator can read what is awaiting approval and compare it with the
+        message they were shown. It cannot contain secret material: frozen keys
+        are refused long before a proposal is stored.
+        """
+        return {
+            "proposal_id": self.proposal_id,
+            "status": "pending_approval",
+            "intent": self.intent,
+            "confidence": self.confidence,
+            "requested_by": self.requested_by,
+            "user_id": self.user_id,
+            "created_at": _iso(self.created_at),
+            "expires_at": _iso(self.expires_at),
+            "expires_in_seconds": self.seconds_remaining(),
+            "change_count": len(self.changes),
+            "change_hash": self.change_hash,
+            "changes": self.changes,
+            "message": self.message,
+        }
 
 
 class NLConfigPlugin(BasePlugin):
@@ -136,6 +363,30 @@ class NLConfigPlugin(BasePlugin):
             "require_approval_for",
             ["change_risk", "whitelist_change", "strategy_change", "stoploss_change"],
         )
+
+        # Proposals awaiting approval, keyed by a random, unguessable id.
+        #
+        # In memory only, and deliberately so: a proposal that survived a restart
+        # would be an approval of something the operator may no longer be looking
+        # at. If the process restarts, pending proposals are gone and the operator
+        # simply re-issues the command - failing closed costs one retyped sentence.
+        self._pending_proposals: Dict[str, PendingProposal] = {}
+
+        # Clamped: a configuration typo must not be able to create proposals that
+        # never expire, nor ones that expire before the operator can read them.
+        try:
+            ttl = int(config.config.get("proposal_ttl_seconds", PROPOSAL_TTL_SECONDS))
+        except (TypeError, ValueError):
+            ttl = PROPOSAL_TTL_SECONDS
+        self.proposal_ttl_seconds = max(
+            MIN_PROPOSAL_TTL_SECONDS, min(MAX_PROPOSAL_TTL_SECONDS, ttl)
+        )
+
+        try:
+            cap = int(config.config.get("max_pending_proposals", MAX_PENDING_PROPOSALS))
+        except (TypeError, ValueError):
+            cap = MAX_PENDING_PROPOSALS
+        self.max_pending_proposals = max(1, min(200, cap))
 
         self.intent_patterns = {
             "change_risk": [
@@ -173,6 +424,11 @@ class NLConfigPlugin(BasePlugin):
                 "auto_apply_safe is set, but config changes are never applied "
                 "automatically by this plugin - only runtime actions can execute."
             )
+        self.logger.info(
+            "Approvals must name a stored proposal (id from the command response); "
+            "proposals expire after %d seconds and can be used once.",
+            self.proposal_ttl_seconds,
+        )
         return True
 
     async def run(self, **kwargs) -> Dict[str, Any]:
@@ -183,9 +439,24 @@ class NLConfigPlugin(BasePlugin):
         return {"status": "idle", "message": "NL config plugin ready for commands"}
 
     # ------------------------------------------------------------------ command
-    async def process_command(self, text: str, user_id: str = "operator") -> Dict[str, Any]:
-        """Interpret a command and either execute it or return a proposal."""
+    async def process_command(
+        self,
+        text: str,
+        user_id: str = "operator",
+        actor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Interpret a command and either execute it or return a proposal.
+
+        ``user_id`` is the label the caller supplied with the request; ``actor``
+        is the authenticated operator identity taken from the bearer token (and
+        its optional name header). The authenticated value is authoritative for
+        the audit log and for the proposal record, so ``approved_by`` carries
+        real attribution instead of a hardcoded "operator".
+        """
         self.logger.info("Processing command: %s", text)
+
+        requester = str(actor or "").strip() or str(user_id or "").strip() or "operator"
 
         parsed = await self._parse_intent(text)
         if not parsed or parsed.confidence < 0.5:
@@ -209,23 +480,37 @@ class NLConfigPlugin(BasePlugin):
                 ),
             }
 
-        # Refuse frozen keys outright, before anything is proposed.
-        blocked = [c for c in changes if c.get("frozen")]
-        if blocked:
-            await self._audit_blocked(parsed, blocked, user_id)
+        # Refuse anything frozen or invalid outright, before anything is proposed.
+        #
+        # A refusal must not be turned into a proposal: the old code only checked
+        # frozen keys here, so an out-of-bounds value or a plugin-run request was
+        # packaged as a "pending approval" and the operator was invited to approve
+        # something that should never have been offered. Every refusal is audited,
+        # because a refused attempt to change safety settings is exactly the kind
+        # of event an operator wants to be able to find later.
+        refused = [c for c in changes if c.get("frozen") or c.get("invalid")]
+        if refused:
+            audited = await self._audit_refused(parsed, refused, requester, user_id_body=user_id)
+            message = self._format_refusal(refused)
+            if not audited:
+                # The refusal itself changes nothing, so it is still safe; but the
+                # operator must not be told something was recorded when it was not.
+                message += (
+                    "\n\nNote: the audit log could not be written, so this refusal "
+                    "could not be recorded."
+                )
             return {
                 "status": "refused",
                 "intent": parsed.intent,
-                "message": " ".join(c["frozen_reason"] for c in blocked),
+                "message": message,
+                "refused_changes": refused,
             }
 
         requires_approval = self._requires_approval(parsed, changes)
 
-        await self.audit.log(
-            plugin="nl_config",
+        audited = await self._write_audit(
             action="command_received",
-            user_initiated=True,
-            input_data={"command": text, "user": user_id},
+            input_data={"command": text, "user": user_id, "authenticated_as": requester},
             output_data={
                 "intent": parsed.intent,
                 "parameters": parsed.parameters,
@@ -233,22 +518,49 @@ class NLConfigPlugin(BasePlugin):
                 "changes": changes,
                 "requires_approval": requires_approval,
             },
-            decision_reasoning=f"Parsed intent: {parsed.intent} (confidence {parsed.confidence:.0%})",
+            reasoning=f"Parsed intent: {parsed.intent} (confidence {parsed.confidence:.0%})",
             risk_level="high" if requires_approval else "low",
-            approved_by=user_id if not requires_approval else None,
+            approved_by=requester if not requires_approval else None,
         )
+        if not audited:
+            # Fail closed. If the decision cannot be recorded, no proposal is
+            # created and nothing is applied - an unrecorded change is worse than
+            # no change, because nobody can find out afterwards what happened.
+            return {
+                "status": "error",
+                "intent": parsed.intent,
+                "message": (
+                    "The audit log could not be written, so nothing was done and no "
+                    "proposal was created. Check the orchestrator's log storage and "
+                    "try again."
+                ),
+            }
 
         if requires_approval:
+            proposal = await self._store_proposal(
+                parsed,
+                changes,
+                requested_by=requester,
+                user_id=user_id,
+                command_text=text,
+            )
             return {
                 "status": "pending_approval",
                 "intent": parsed.intent,
                 "confidence": parsed.confidence,
+                # The operator needs this id: an approval names the stored
+                # proposal, it does not resend the change list.
+                "proposal_id": proposal.proposal_id,
+                "expires_at": _iso(proposal.expires_at),
+                "expires_in_seconds": proposal.seconds_remaining(),
                 "proposed_changes": changes,
-                "message": self._format_changes_message(parsed, changes),
+                "message": self._format_changes_message(parsed, changes, proposal),
                 "approval_required": True,
             }
 
-        result = await self._apply_changes(changes)
+        result = await self._apply_changes(
+            changes, approved_by=requester, source="command_no_approval"
+        )
         return {
             "status": "applied",
             "intent": parsed.intent,
@@ -380,13 +692,13 @@ Examples:
         elif parsed.intent == "change_stoploss":
             value = parsed.parameters.get("value") or parsed.parameters.get("stoploss")
             if value is not None:
-                changes.append(
-                    self._config_change(
-                        "stoploss",
-                        value,
-                        f"Set the stop loss to {abs(float(value)) * 100:.1f}%",
-                    )
-                )
+                # No description is passed in on purpose. The description is built
+                # from the *validated* value inside _config_change, because the old
+                # inline f-string called float(value) while formatting - so an LLM
+                # answer of {"value": "aggressive"} raised ValueError before
+                # validation could refuse it, and the operator got an HTTP 500
+                # with nothing in the audit log.
+                changes.append(self._config_change("stoploss", value))
             else:
                 changes.append(
                     {
@@ -498,29 +810,310 @@ Examples:
                 }
             )
 
-        # Reject any attempt to touch a frozen key.
-        for change in changes:
-            key = change.get("key")
-            if key and self._is_frozen(key):
-                change["frozen"] = True
-                change["frozen_reason"] = self._frozen_reason(key)
-
-        return changes
+        # Final safety pass.
+        #
+        # Every change is normalised and re-validated here, and the *same*
+        # function is used again on the approve path (see
+        # _validate_stored_changes). One validator, used twice, is the point: the
+        # previous code validated only while proposing, so the approve path
+        # carried out whatever list it was handed.
+        return [self._validate_change(change) for change in changes]
 
     # ------------------------------------------------------------- change helpers
-    def _is_frozen(self, key: str) -> bool:
-        if key in FROZEN_KEYS:
-            return True
-        return any(key.startswith(f"{root}.") for root in FROZEN_KEYS)
+    @staticmethod
+    def _normalise_key(key: Any) -> str:
+        """
+        Normalise a configuration key for comparison: strip, then lower-case.
 
-    def _frozen_reason(self, key: str) -> str:
-        for candidate in (key, key.split(".")[0]):
+        'DRY_RUN', 'Dry_Run', ' dry_run' and 'dry_run ' are the same setting to a
+        human, so they must be the same setting to the safety check. The old
+        exact-match, case-sensitive comparison said False for all of them while
+        saying True for 'dry_run' - a frozen key that could be reached by typing
+        it differently.
+        """
+        if key is None:
+            return ""
+        if isinstance(key, bool):  # a bool key is nonsense; do not stringify it
+            return ""
+        return str(key).strip().lower()
+
+    def _is_frozen(self, key: Any) -> bool:
+        """Is this key (in any spelling) one this interface may never touch?"""
+        normalised = self._normalise_key(key)
+        if not normalised:
+            return False
+        if normalised in FROZEN_KEYS:
+            return True
+        # Nested paths: 'exchange.secret' and anything beneath a frozen root.
+        return any(normalised.startswith(f"{root}.") for root in FROZEN_KEYS)
+
+    def _frozen_reason(self, key: Any) -> str:
+        normalised = self._normalise_key(key)
+        for candidate in (normalised, normalised.split(".")[0]):
             if candidate in FROZEN_KEYS:
                 return FROZEN_KEYS[candidate]
         return f"Changing '{key}' is not permitted through this interface."
 
-    def _config_change(self, key: str, value: Any, description: str) -> Dict[str, Any]:
-        """Build a config proposal, validated against BOUNDS."""
+    def _validate_value(self, key: str, value: Any) -> Tuple[bool, Any, Optional[str]]:
+        """
+        Check and normalise one value for one setting.
+
+        Returns ``(ok, normalised_value, reason)``. ``reason`` is written for a
+        non-expert operator and explains what to do instead.
+
+        Two traps this closes:
+
+        * ``isinstance(True, int)`` is ``True`` in Python, so a bare bool would be
+          read as 1 or 0. ``True`` is a legal value for ``max_open_trades``, so an
+          LLM answering "yes" would have silently set a real trading limit.
+          Booleans are therefore rejected *before* any numeric handling.
+        * ``float("nan")`` compares false against every bound, so a NaN passed the
+          old min/max check untouched. Non-finite values are refused.
+        """
+        if key == "strategy":
+            # A strategy name is the one proposable setting that is not a number.
+            # It is checked strictly because it is copied into the Swarm config.
+            if isinstance(value, bool) or not isinstance(value, str):
+                return (
+                    False,
+                    value,
+                    "A strategy has to be named as a single word, for example "
+                    "'ModerateMultiPairStrategy'. Nothing else can be used.",
+                )
+            candidate = value.strip()
+            if not _STRATEGY_NAME_RE.match(candidate):
+                return (
+                    False,
+                    value,
+                    f"'{value}' is not a usable strategy name. Use the plain class "
+                    "name of the strategy, for example 'ModerateMultiPairStrategy'.",
+                )
+            return True, candidate, None
+
+        bounds = BOUNDS.get(key)
+        if bounds is None:
+            # No bounds means no agreed safety limit for this setting, so it
+            # cannot be proposed at all. Refusing is the only safe reading:
+            # accepting it would mean any key at all could be "validated" through.
+            return (
+                False,
+                value,
+                f"'{key}' is not a setting this interface is allowed to change. "
+                f"The settings it can change are: {', '.join(sorted(PROPOSABLE_KEYS))}.",
+            )
+
+        if isinstance(value, bool):
+            return (
+                False,
+                value,
+                f"'{key}' needs a number, not a yes/no answer. A yes/no value would "
+                "be read as 1 or 0, which is a real trading limit, so it is refused.",
+            )
+        if value is None:
+            return False, value, f"'{key}' needs a number, but none was given."
+
+        if isinstance(value, (int, float)):
+            numeric: float = float(value)
+        elif isinstance(value, str):
+            text = value.strip()
+            try:
+                numeric = float(text)
+            except ValueError:
+                return (
+                    False,
+                    value,
+                    f"I could not read '{value}' as a number, so I did not change "
+                    f"'{key}'. Give a plain number, for example -0.06.",
+                )
+        else:
+            return (
+                False,
+                value,
+                f"'{key}' needs a number, but it was given as "
+                f"{type(value).__name__}, which cannot be checked.",
+            )
+
+        if not math.isfinite(numeric):
+            return (
+                False,
+                value,
+                f"'{key}' was given a value that is not a real number "
+                f"({value!r}). It is refused because it cannot be compared against "
+                "the safety limits.",
+            )
+
+        if numeric < bounds["min"] or numeric > bounds["max"]:
+            return (
+                False,
+                value,
+                f"'{key}' must be between {bounds['min']} and {bounds['max']}; you "
+                f"asked for {numeric}. {bounds.get('explain', '')}".strip(),
+            )
+
+        if key in INTEGER_KEYS:
+            if numeric != int(numeric):
+                return (
+                    False,
+                    value,
+                    f"'{key}' must be a whole number, and {numeric} is not. Rounding "
+                    "it either way would change how much money is at risk, so it is "
+                    "refused.",
+                )
+            return True, int(numeric), None
+
+        return True, numeric, None
+
+    def _validate_change(self, change: Any) -> Dict[str, Any]:
+        """
+        Normalise and validate one change dictionary.
+
+        Always returns a dict, and never raises: an unexpected value becomes a
+        change marked ``invalid``, which the caller refuses. The returned dict has
+
+        * ``key`` normalised (stripped, lower-cased) and ``value`` coerced for
+          numeric settings, so what is displayed is what would be applied;
+        * ``frozen``/``frozen_reason`` when the key may never be touched;
+        * ``invalid``/``reason`` when the change cannot be carried out.
+        """
+        if not isinstance(change, dict):
+            return {
+                "type": "unknown",
+                "invalid": True,
+                "reason": (
+                    "One of the requested changes was not in a form this service "
+                    "understands, so it was refused."
+                ),
+            }
+
+        normalised: Dict[str, Any] = dict(change)
+        kind = normalised.get("type")
+        if not isinstance(kind, str) or not kind:
+            normalised["type"] = "unknown"
+            normalised["invalid"] = True
+            normalised["reason"] = (
+                "A change arrived without a type, so there is no way to tell what it "
+                "would do. It was refused."
+            )
+            return normalised
+        kind = kind.strip().lower()
+        normalised["type"] = kind
+
+        if kind == "proposal_only":
+            key = self._normalise_key(normalised.get("key"))
+            normalised["key"] = key
+            if not key:
+                normalised["invalid"] = True
+                normalised["reason"] = (
+                    "A settings change arrived without naming a setting, so it was "
+                    "refused."
+                )
+                return normalised
+
+            if self._is_frozen(key):
+                normalised["frozen"] = True
+                normalised["frozen_reason"] = self._frozen_reason(key)
+                return normalised
+
+            ok, value, reason = self._validate_value(key, normalised.get("value"))
+            if not ok:
+                normalised["invalid"] = True
+                normalised["reason"] = reason
+                return normalised
+            normalised["value"] = value
+            return normalised
+
+        if kind == "bot_control":
+            action = normalised.get("action")
+            action = action.strip().lower() if isinstance(action, str) else ""
+            normalised["action"] = action
+            if action not in BOT_CONTROL_ACTIONS:
+                normalised["invalid"] = True
+                normalised["reason"] = (
+                    f"'{normalised.get('action')}' is not something this interface "
+                    "can do to the bot. The only choices are 'pause' and 'resume'."
+                )
+            return normalised
+
+        if kind == "runtime_pairs":
+            pairs = normalised.get("pairs")
+            if not isinstance(pairs, list) or not pairs:
+                normalised["invalid"] = True
+                normalised["reason"] = (
+                    "A pair restriction arrived without a list of coins, so there was "
+                    "nothing to restrict trading to. It was refused."
+                )
+                return normalised
+            if len(pairs) > MAX_CHANGES_PER_PROPOSAL * 4:
+                normalised["invalid"] = True
+                normalised["reason"] = (
+                    "That is far more coins than this bot is set up to trade, so the "
+                    "request was refused."
+                )
+                return normalised
+            cleaned: List[str] = []
+            for pair in pairs:
+                if not isinstance(pair, str) or not _PAIR_RE.match(pair.strip()):
+                    normalised["invalid"] = True
+                    normalised["reason"] = (
+                        f"'{pair}' is not a trading pair I recognise. Pairs look like "
+                        "'BTC/CAD'."
+                    )
+                    return normalised
+                cleaned.append(pair.strip().upper())
+            normalised["pairs"] = cleaned
+            return normalised
+
+        if kind in PLUGIN_RUN_CHANGE_TYPES:
+            # An "approval" must never be able to start a plugin. Running a plugin
+            # has its own authenticated endpoint; routing it through the approval
+            # gate turned "approve the message you were shown" into "run anything".
+            plugin_name = normalised.get("action")
+            normalised["invalid"] = True
+            normalised["reason"] = (
+                "Approving cannot start a plugin run. To run "
+                f"'{plugin_name}', use the plugin control endpoint: "
+                f"POST /api/v1/plugins/{plugin_name}/control with "
+                '{"action": "run"}. That endpoint is authenticated and recorded in '
+                "the audit log."
+            )
+            return normalised
+
+        # note / clarification / query need no value validation: they carry no
+        # setting and change nothing on the bot.
+        return normalised
+
+    def _default_description(self, key: str, value: Any) -> str:
+        """
+        A plain-language description built from an already-validated value.
+
+        This is the replacement for the old inline ``f"{abs(float(value)) * 100:.1f}%"``,
+        which evaluated ``float(value)`` before the value had been checked.
+        """
+        if key == "stoploss":
+            return f"Set the stop loss to {_fmt_percent(value)}"
+        if key == "trailing_stop_positive":
+            return f"Follow profit from {_fmt_percent(value)}"
+        if key == "tradable_balance_ratio":
+            return f"Use at most {_fmt_percent(value)} of the wallet"
+        if key == "amount_reserve_percent":
+            return f"Keep a {_fmt_percent(value)} buffer for fees and slippage"
+        if key == "max_open_trades":
+            return f"Allow at most {value} trades at once"
+        if key == "strategy":
+            return f"Switch strategy to {value}"
+        return f"Change {key} to {value}"
+
+    def _config_change(
+        self, key: str, value: Any, description: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Build a config proposal and validate it.
+
+        The description is built *after* validation and from the normalised value,
+        so nothing in this method can raise on a value the LLM invented. If the
+        change is refused, a readable description is still produced, because the
+        operator has to be told what was refused.
+        """
         change: Dict[str, Any] = {
             "type": "proposal_only",
             "key": key,
@@ -530,22 +1123,22 @@ Examples:
             "plain_language": "",
         }
 
-        bounds = BOUNDS.get(key)
+        change = self._validate_change(change)
+
+        if change.get("invalid") or change.get("frozen"):
+            # Keep something readable in "description" so the refusal message and
+            # the audit entry identify the setting without a KeyError.
+            if not change.get("description"):
+                change["description"] = f"Change '{change.get('key') or key}'"
+            return change
+
+        bounds = BOUNDS.get(change["key"])
         if bounds:
             change["plain_language"] = bounds["explain"]
-            try:
-                numeric = float(value)
-            except (TypeError, ValueError):
-                change["invalid"] = True
-                change["reason"] = f"'{value}' is not a number."
-                return change
-
-            if numeric < bounds["min"] or numeric > bounds["max"]:
-                change["invalid"] = True
-                change["reason"] = (
-                    f"{key} must be between {bounds['min']} and {bounds['max']}. "
-                    f"You asked for {numeric}."
-                )
+        if not change.get("description"):
+            change["description"] = self._default_description(
+                change["key"], change["value"]
+            )
         return change
 
     def _get_risk_config(self, risk_level: str) -> List[Dict[str, Any]]:
@@ -610,13 +1203,48 @@ Examples:
         """Queries run immediately; anything that alters behaviour needs approval."""
         if not changes:
             return False
-        if all(c["type"] == "clarification" for c in changes):
+        kinds = [c.get("type") if isinstance(c, dict) else None for c in changes]
+        if all(kind == "clarification" for kind in kinds):
             return False
-        if all(c["type"] == "query" for c in changes):
+        if all(kind == "query" for kind in kinds):
             return False
         return True
 
-    def _format_changes_message(self, parsed: NLCommand, changes: List[Dict]) -> str:
+    def _format_refusal(self, refused: List[Dict[str, Any]]) -> str:
+        """
+        Plain-language explanation of a refusal.
+
+        A refusal has to say what was refused and why, in words an operator who
+        does not read code can act on - otherwise the safe answer looks like a
+        broken service.
+        """
+        lines = ["I did not make that change. Here is why:", ""]
+        for change in refused:
+            description = change.get("description") or change.get("key") or change.get("type")
+            reason = change.get("frozen_reason") or change.get("reason") or "Refused by policy."
+            lines.append(f"  - {description}: {reason}")
+        lines += [
+            "",
+            "Nothing was changed and nothing was proposed. This refusal has been "
+            "recorded in the audit log.",
+        ]
+        return "\n".join(lines)
+
+    def _format_changes_message(
+        self,
+        parsed: NLCommand,
+        changes: List[Dict],
+        proposal: Optional[PendingProposal] = None,
+    ) -> str:
+        """
+        The message the operator reads before deciding.
+
+        When a proposal id exists it is printed here, together with a short form of
+        the change-list fingerprint. The operator can then check that the id and
+        fingerprint on the /api/v1/proposals list are the same as the ones on the
+        message they approved - which is the whole point of binding an approval to
+        a stored proposal instead of to a rendered message.
+        """
         lines = [
             f'Command understood as: {parsed.intent} (confidence {parsed.confidence:.0%})',
             "",
@@ -625,9 +1253,11 @@ Examples:
         for change in changes:
             marker = "  - "
             if change.get("invalid"):
-                lines.append(f"{marker}REFUSED: {change['description']} - {change['reason']}")
+                lines.append(
+                    f"{marker}REFUSED: {change.get('description')} - {change.get('reason')}"
+                )
                 continue
-            lines.append(f"{marker}{change.get('description', change.get('type'))}")
+            lines.append(f"{marker}{change.get('description') or change.get('type')}")
             if change.get("plain_language"):
                 lines.append(f"      What this means: {change['plain_language']}")
 
@@ -638,6 +1268,22 @@ Examples:
                 "Approving records your decision and gives you the exact values to put",
                 "into the 'freqtrade_canada_config' Swarm config, then redeploy.",
                 "Nothing changes until you do that.",
+            ]
+
+        if proposal is not None:
+            remaining = proposal.seconds_remaining()
+            valid_for = (
+                f"{remaining // 60} minutes" if remaining >= 60 else f"{remaining} seconds"
+            )
+            lines += [
+                "",
+                "To approve, send this id back - nothing else is accepted:",
+                f"  proposal_id: {proposal.proposal_id}",
+                f"  fingerprint: {proposal.change_hash[:16]}",
+                f"This proposal expires at {_iso(proposal.expires_at)} "
+                f"({valid_for} from now) and can be used once. Approving applies "
+                "exactly the list above; if the list ever stops matching the "
+                "fingerprint, it is refused.",
             ]
         return "\n".join(lines)
 
@@ -650,68 +1296,146 @@ Examples:
         ]
 
     # ------------------------------------------------------------------- apply
-    async def _apply_changes(self, changes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _apply_changes(
+        self,
+        changes: List[Dict[str, Any]],
+        *,
+        approved_by: Optional[str] = None,
+        proposal_id: Optional[str] = None,
+        source: str = "direct",
+    ) -> Dict[str, Any]:
         """
-        Execute changes.
+        Execute a change list, auditing first, isolating each change, and always
+        writing a completion entry.
 
         Runtime actions run for real. Config proposals are NOT applied - they are
         returned as instructions, because nothing in this system can change the
         bot's configuration while it is running.
+
+        The ordering here is the fix for a verified defect:
+
+        * The **intent** (the whole list plus its SHA-256 fingerprint) is written
+          to the audit log *before* the first change runs. The old code wrote a
+          single entry after the loop returned, so a list like
+          ``[{bot_control: pause}, {runtime_pairs}]`` really paused the bot, then
+          raised ``KeyError('pairs')``, returned HTTP 500, and left no audit
+          record at all. Whoever could reach the API could pick which state
+          changes left no trace.
+        * Each change is wrapped in its own ``try/except`` inside
+          :meth:`_apply_one_change`, so one failure cannot skip the rest and
+          cannot skip the completion entry.
+        * The completion entry is written in a ``finally`` block, so it happens
+          even if something unexpected escapes.
+
+        If the audit log cannot be written, **nothing is applied** and the caller
+        is told so: an unrecorded change to a live trading bot is worse than no
+        change, because nobody can find out afterwards what happened.
         """
-        executed: List[Dict[str, Any]] = []
-        proposals: List[Dict[str, Any]] = []
-
-        for change in changes:
-            kind = change.get("type")
-
-            if kind == "proposal_only":
-                if change.get("invalid"):
-                    executed.append(
-                        {"change": change, "status": "refused", "reason": change.get("reason")}
-                    )
-                    continue
-                proposals.append(
-                    {
-                        "key": change["key"],
-                        "value": change["value"],
-                        "description": change.get("description"),
-                    }
-                )
-                continue
-
-            if kind == "note" or kind == "clarification":
-                continue
-
-            if kind == "query":
-                executed.append(await self._handle_query(change))
-                continue
-
-            if kind == "trigger":
-                try:
-                    result = await self.orchestrator.run_plugin_now(change["action"])
-                    executed.append(
-                        {"change": change, "status": "triggered", "result": result}
-                    )
-                except Exception as e:
-                    executed.append({"change": change, "status": "failed", "error": str(e)})
-                continue
-
-            if kind == "bot_control":
-                executed.append(await self._handle_bot_control(change))
-                continue
-
-            if kind == "runtime_pairs":
-                executed.append(await self._handle_restrict_pairs(change))
-                continue
-
-            executed.append(
-                {"change": change, "status": "unsupported", "reason": f"Unknown change type '{kind}'"}
+        # Defensive: the loop below must not be able to raise before the
+        # completion entry is written, so a non-list is treated as "nothing to
+        # apply" rather than iterated over.
+        if not isinstance(changes, list):
+            self.logger.warning(
+                "_apply_changes was given %s instead of a list; applying nothing.",
+                type(changes).__name__,
             )
+            changes = []
+
+        change_hash = _hash_changes(changes)
+
+        # A list that only reads (a status query) is not a high-risk event, and
+        # marking it as one would train the operator to ignore high-risk entries.
+        # Anything that can change the bot or its configuration is high risk.
+        risk_level = (
+            "high"
+            if any(
+                isinstance(change, dict)
+                and change.get("type") in ("proposal_only", "bot_control", "runtime_pairs")
+                for change in changes
+            )
+            else "low"
+        )
+
+        started = await self._write_audit(
+            action="command_apply_started",
+            input_data={
+                "changes": changes,
+                "change_hash": change_hash,
+                "change_count": len(changes),
+                "proposal_id": proposal_id,
+                "source": source,
+            },
+            output_data={"status": "applying"},
+            reasoning=(
+                "Applying a change list"
+                + (f" from approved proposal {proposal_id}" if proposal_id else "")
+                + ". This entry is written before anything runs so that a change "
+                "which fails part way through is still recorded."
+            ),
+            risk_level=risk_level,
+            approved_by=approved_by,
+        )
+
+        if not started:
+            return {
+                "executed": [],
+                "proposals": [],
+                "proposals_applied": False,
+                "status": "refused",
+                "change_hash": change_hash,
+                "error": (
+                    "The audit log could not be written, so nothing was applied. "
+                    "Every change has to be recorded before it happens; check the "
+                    "orchestrator's log storage and try again."
+                ),
+                "summary": self._summarise([]),
+                "note": "Nothing was applied because it could not be recorded.",
+            }
+
+        executed: List[Dict[str, Any]] = []
+        try:
+            for change in changes:
+                executed.append(await self._apply_one_change(change))
+        finally:
+            # Always written, including when a change raised. Without this the
+            # audit trail would show an apply that never ended.
+            summary = self._summarise(executed)
+            await self._write_audit(
+                action="command_apply_completed",
+                input_data={
+                    "changes": changes,
+                    "change_hash": change_hash,
+                    "proposal_id": proposal_id,
+                    "source": source,
+                },
+                output_data={"status": "completed", "summary": summary, "results": executed},
+                reasoning=(
+                    "Finished applying the change list. Per-change results are "
+                    "recorded so a partial failure is visible instead of silent."
+                ),
+                risk_level=risk_level,
+                approved_by=approved_by,
+            )
+
+        proposals = [
+            {
+                "key": entry.get("key"),
+                "value": entry.get("value"),
+                "description": entry.get("description"),
+            }
+            for entry in executed
+            if entry.get("status") == "proposed"
+        ]
+        summary = self._summarise(executed)
 
         return {
             "executed": executed,
             "proposals": proposals,
             "proposals_applied": False,
+            "change_hash": change_hash,
+            "proposal_id": proposal_id,
+            "summary": summary,
+            "status": "completed" if summary["failed"] == 0 else "completed_with_failures",
             "note": (
                 "Proposed settings are not applied automatically. Update the "
                 "'freqtrade_canada_config' Swarm config and redeploy to apply them."
@@ -719,6 +1443,111 @@ Examples:
                 else "No configuration changes were required."
             ),
         }
+
+    @staticmethod
+    def _summarise(executed: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Count the per-change outcomes so a partial failure is impossible to miss."""
+        summary = {
+            "total": len(executed),
+            "applied": 0,
+            "proposed": 0,
+            "refused": 0,
+            "failed": 0,
+            "other": 0,
+        }
+        for entry in executed:
+            status = entry.get("status") if isinstance(entry, dict) else None
+            if status in ("success", "triggered", "applied"):
+                summary["applied"] += 1
+            elif status == "proposed":
+                summary["proposed"] += 1
+            elif status in ("refused", "unsupported"):
+                summary["refused"] += 1
+            elif status in ("failed", "unavailable"):
+                summary["failed"] += 1
+            else:
+                summary["other"] += 1
+        return summary
+
+    async def _apply_one_change(self, change: Any) -> Dict[str, Any]:
+        """
+        Carry out one change. Never raises.
+
+        Any failure becomes a per-change result with ``status: "failed"``, so the
+        caller can report exactly which change failed instead of losing the whole
+        response - and instead of aborting the changes that came after it.
+        """
+        try:
+            if not isinstance(change, dict):
+                return {
+                    "change": change,
+                    "status": "refused",
+                    "reason": "That change was not in a form this service understands.",
+                }
+
+            kind = change.get("type")
+
+            if kind == "proposal_only":
+                if change.get("frozen") or change.get("invalid"):
+                    return {
+                        "change": change,
+                        "status": "refused",
+                        "reason": change.get("frozen_reason") or change.get("reason"),
+                    }
+                return {
+                    "change": change,
+                    "status": "proposed",
+                    "key": change.get("key"),
+                    "value": change.get("value"),
+                    "description": change.get("description"),
+                }
+
+            if kind in ("note", "clarification"):
+                return {"change": change, "status": "skipped"}
+
+            if kind == "query":
+                return await self._handle_query(change)
+
+            if kind in PLUGIN_RUN_CHANGE_TYPES:
+                # Defence in depth. _validate_change already refuses these, so a
+                # trigger change should never reach here; if one ever does, it is
+                # refused rather than run. An approval must not be able to start a
+                # plugin, and neither must any other path through this method.
+                plugin_name = change.get("action")
+                self.logger.warning(
+                    "Refused an attempt to run plugin '%s' through the change-apply path",
+                    plugin_name,
+                )
+                return {
+                    "change": change,
+                    "status": "refused",
+                    "reason": (
+                        "Approving cannot start a plugin run. Use "
+                        f"POST /api/v1/plugins/{plugin_name}/control with "
+                        '{"action": "run"} instead.'
+                    ),
+                }
+
+            if kind == "bot_control":
+                return await self._handle_bot_control(change)
+
+            if kind == "runtime_pairs":
+                return await self._handle_restrict_pairs(change)
+
+            return {
+                "change": change,
+                "status": "unsupported",
+                "reason": f"Unknown change type '{kind}'",
+            }
+        except Exception as e:
+            # Includes the KeyError that used to escape and turn a real state
+            # change into an unrecorded HTTP 500.
+            self.logger.error("Change failed: %s: %s", type(e).__name__, e)
+            return {
+                "change": change,
+                "status": "failed",
+                "error": f"{type(e).__name__}: {e}",
+            }
 
     async def _handle_query(self, change: Dict[str, Any]) -> Dict[str, Any]:
         action = change.get("action")
@@ -764,69 +1593,581 @@ Examples:
 
     async def _handle_bot_control(self, change: Dict[str, Any]) -> Dict[str, Any]:
         action = change.get("action")
+        action = action.strip().lower() if isinstance(action, str) else ""
         try:
             if action == "pause":
                 result = await self.freqtrade.pause()
             elif action == "resume":
                 result = await self.freqtrade.start()
             else:
-                return {"change": change, "status": "unsupported", "error": f"Unknown action '{action}'"}
+                return {
+                    "change": change,
+                    "status": "unsupported",
+                    "error": (
+                        f"'{change.get('action')}' is not something this interface can "
+                        "do to the bot. The only choices are 'pause' and 'resume'."
+                    ),
+                }
             return {"change": change, "status": "success", "result": result}
         except FreqtradeAPIError as e:
             return {"change": change, "status": "failed", "error": str(e)}
 
     async def _handle_restrict_pairs(self, change: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Restrict trading to a set of pairs.
+
+        The pair list is checked here as well as in _validate_change. The old code
+        indexed ``change["pairs"]`` directly, so a change that arrived without a
+        pair list raised ``KeyError('pairs')`` - which is exactly the failure that
+        let a real pause happen and then lose its audit record.
+        """
+        pairs = change.get("pairs")
+        if not isinstance(pairs, list) or not pairs:
+            return {
+                "change": change,
+                "status": "refused",
+                "error": (
+                    "No list of coins was given, so there was nothing to restrict "
+                    "trading to. Nothing was changed."
+                ),
+            }
         try:
-            result = await self.freqtrade.set_whitelist(change["pairs"])
+            result = await self.freqtrade.set_whitelist(pairs)
             return {"change": change, "status": "success", "result": result}
         except UnsupportedOperation as e:
             return {"change": change, "status": "refused", "error": str(e)}
         except FreqtradeAPIError as e:
             return {"change": change, "status": "failed", "error": str(e)}
 
-    async def _audit_blocked(
-        self, parsed: NLCommand, blocked: List[Dict[str, Any]], user_id: str
-    ) -> None:
-        """Record a refused attempt. Refusals are security-relevant events."""
-        await self.audit.log(
-            plugin="nl_config",
+    # ------------------------------------------------------------------- audit
+    async def _write_audit(
+        self,
+        *,
+        action: str,
+        input_data: Dict[str, Any],
+        output_data: Dict[str, Any],
+        reasoning: str,
+        risk_level: str = "low",
+        approved_by: Optional[str] = None,
+        user_initiated: bool = True,
+    ) -> bool:
+        """
+        Write one audit entry. Returns True on success, False on any failure.
+
+        Never raises: an audit failure has to be *handled* by the caller (which
+        fails closed and refuses to act), not turned into a 500 that hides what
+        happened. The failure is logged at CRITICAL because a trading bot with no
+        working audit trail is a serious condition, not a warning.
+        """
+        if self.audit is None:
+            self.logger.critical(
+                "SECURITY: the audit logger is not available, so '%s' could not be "
+                "recorded. Failing closed.",
+                action,
+            )
+            return False
+        try:
+            await self.audit.log(
+                plugin="nl_config",
+                action=action,
+                user_initiated=user_initiated,
+                input_data=input_data,
+                output_data=output_data,
+                decision_reasoning=reasoning,
+                risk_level=risk_level,
+                approved_by=approved_by,
+            )
+            return True
+        except Exception as e:
+            self.logger.critical(
+                "SECURITY: could not write the '%s' audit entry (%s: %s). Failing closed.",
+                action,
+                type(e).__name__,
+                e,
+            )
+            return False
+
+    async def _audit_refused(
+        self,
+        parsed: NLCommand,
+        refused: List[Dict[str, Any]],
+        user_id: str,
+        user_id_body: Optional[str] = None,
+    ) -> bool:
+        """
+        Record a refused command. Returns True if the refusal was recorded.
+
+        Frozen-key attempts and out-of-bounds values are both refused here, and
+        both are recorded: an operator investigating "did anything try to change
+        my stop loss?" needs to find the attempts that were stopped, not only the
+        ones that succeeded.
+        """
+        return await self._write_audit(
             action="command_refused",
-            user_initiated=True,
-            input_data={"command": parsed.original_text, "user": user_id},
-            output_data={"blocked": blocked},
-            decision_reasoning=(
-                "Command attempted to modify a frozen setting "
-                f"({', '.join(c.get('key', '?') for c in blocked)}). Refused by policy."
+            input_data={
+                "command": parsed.original_text,
+                "user": user_id,
+                "supplied_user_id": user_id_body,
+            },
+            output_data={"refused": refused},
+            reasoning=(
+                "Command was refused by policy before anything was proposed "
+                f"({', '.join(str(c.get('key') or c.get('type')) for c in refused)}). "
+                "Refusals are recorded so attempts to touch frozen or out-of-bounds "
+                "settings remain visible."
             ),
             risk_level="high",
             approved_by=None,
         )
 
-    async def approve_and_apply(
-        self, changes: List[Dict[str, Any]], approved_by: str = "operator"
+    # --------------------------------------------------------------- proposals
+    def _purge_expired(self, now: Optional[float] = None) -> List[PendingProposal]:
+        """Drop expired proposals and return them, so the caller can audit them."""
+        moment = time.time() if now is None else now
+        expired = [p for p in self._pending_proposals.values() if p.is_expired(moment)]
+        for proposal in expired:
+            self._pending_proposals.pop(proposal.proposal_id, None)
+        return expired
+
+    async def _store_proposal(
+        self,
+        parsed: NLCommand,
+        changes: List[Dict[str, Any]],
+        *,
+        requested_by: str,
+        user_id: str = "operator",
+        command_text: str = "",
+        message: str = "",
+    ) -> PendingProposal:
+        """
+        Store a change list under a fresh random id and return it.
+
+        The id comes from :func:`secrets.token_urlsafe`, so it cannot be guessed
+        from a previous one. A collision is checked for anyway: if two proposals
+        shared an id, approving one could apply the other.
+        """
+        now = time.time()
+        for expired in self._purge_expired(now):
+            await self._write_audit(
+                action="proposal_expired",
+                input_data={
+                    "proposal_id": expired.proposal_id,
+                    "changes": expired.changes,
+                    "change_hash": expired.change_hash,
+                },
+                output_data={"status": "expired"},
+                reasoning=(
+                    "A proposal passed its expiry time without being approved. "
+                    "Expired proposals cannot be approved later."
+                ),
+                risk_level="low",
+                approved_by=None,
+            )
+
+        # Keep the store bounded. The oldest is discarded first, and the discard
+        # is recorded, because a proposal silently vanishing is exactly the kind
+        # of thing an operator would later be unable to explain.
+        while len(self._pending_proposals) >= self.max_pending_proposals:
+            oldest = min(
+                self._pending_proposals.values(), key=lambda p: p.created_at, default=None
+            )
+            if oldest is None:
+                break
+            self._pending_proposals.pop(oldest.proposal_id, None)
+            self.logger.warning(
+                "Discarding pending proposal %s to make room (limit %d)",
+                oldest.proposal_id,
+                self.max_pending_proposals,
+            )
+            await self._write_audit(
+                action="proposal_discarded",
+                input_data={
+                    "proposal_id": oldest.proposal_id,
+                    "changes": oldest.changes,
+                    "change_hash": oldest.change_hash,
+                },
+                output_data={"status": "discarded", "reason": "store_full"},
+                reasoning=(
+                    "Too many proposals were waiting for approval, so the oldest was "
+                    "discarded to keep the service's memory bounded. It can no "
+                    "longer be approved; re-issue the command if it is still wanted."
+                ),
+                risk_level="low",
+                approved_by=None,
+            )
+
+        proposal_id = secrets.token_urlsafe(32)
+        while proposal_id in self._pending_proposals:
+            proposal_id = secrets.token_urlsafe(32)
+
+        # Store a deep copy, and fingerprint the copy that is actually stored.
+        # A shallow copy would leave nested values (a pair list, say) shared with
+        # the caller, so a later mutation could change the stored proposal - which
+        # the fingerprint check would then refuse, but only after confusing the
+        # operator. Hashing the stored copy keeps "what was shown" and "what is
+        # applied" provably identical.
+        try:
+            stored_changes = copy.deepcopy(list(changes))
+        except Exception as e:  # pragma: no cover - defensive
+            self.logger.warning(
+                "Could not deep-copy the change list (%s); storing a shallow copy.", e
+            )
+            stored_changes = [dict(change) for change in changes if isinstance(change, dict)]
+
+        proposal = PendingProposal(
+            proposal_id=proposal_id,
+            created_at=now,
+            expires_at=now + self.proposal_ttl_seconds,
+            requested_by=requested_by or "unknown",
+            user_id=user_id or "operator",
+            intent=parsed.intent,
+            confidence=parsed.confidence,
+            changes=stored_changes,
+            change_hash=_hash_changes(stored_changes),
+            command_text=command_text,
+            message=message,
+        )
+        self._pending_proposals[proposal_id] = proposal
+
+        await self._write_audit(
+            action="proposal_created",
+            input_data={
+                "proposal_id": proposal_id,
+                "command": command_text,
+                "requested_by": proposal.requested_by,
+                "changes": proposal.changes,
+                "change_hash": proposal.change_hash,
+                "expires_at": _iso(proposal.expires_at),
+            },
+            output_data={"status": "pending_approval"},
+            reasoning=(
+                "A change list was stored for approval. It is single-use, expires "
+                f"in {self.proposal_ttl_seconds} seconds, and is fingerprinted so "
+                "the approved list can be proven to be the list that was shown."
+            ),
+            risk_level="high",
+            approved_by=None,
+        )
+        return proposal
+
+    def list_pending_proposals(self) -> List[Dict[str, Any]]:
+        """
+        Every proposal waiting for approval, newest first.
+
+        This exists so the operator can see, without trusting a chat message, what
+        is actually queued to happen. Expired proposals are dropped first, so the
+        list never offers something that would be refused.
+        """
+        self._purge_expired()
+        return [
+            proposal.public_dict()
+            for proposal in sorted(
+                self._pending_proposals.values(), key=lambda p: p.created_at, reverse=True
+            )
+        ]
+
+    def _validate_stored_changes(
+        self, changes: Any, proposal_id: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Re-run every safety check against a stored proposal, and return the
+        validated list to apply.
+
+        This is the check that was missing entirely: validation used to happen
+        only while *proposing*, so approving carried out whatever list it was
+        handed. Raises :class:`ProposalError` if anything is wrong - the whole
+        proposal is refused rather than partially applied, because the operator
+        approved a specific list and applying part of it would be applying
+        something they did not approve.
+        """
+        if not isinstance(changes, list) or not changes:
+            raise ProposalError(
+                "That proposal does not contain any changes, so there is nothing to "
+                "apply. It has been discarded; please issue the command again.",
+                400,
+            )
+        if len(changes) > MAX_CHANGES_PER_PROPOSAL:
+            raise ProposalError(
+                f"That proposal contains {len(changes)} changes, which is more than "
+                f"this service will apply at once (limit {MAX_CHANGES_PER_PROPOSAL}). "
+                "It has been refused; please issue the changes in smaller groups.",
+                400,
+            )
+
+        validated: List[Dict[str, Any]] = []
+        problems: List[str] = []
+        for raw in changes:
+            change = self._validate_change(raw)
+            validated.append(change)
+            kind = change.get("type")
+            if change.get("frozen"):
+                problems.append(change.get("frozen_reason") or "A frozen setting was requested.")
+            elif change.get("invalid"):
+                problems.append(change.get("reason") or "A change was not valid.")
+            elif kind not in APPROVABLE_CHANGE_TYPES:
+                problems.append(
+                    f"An approval cannot carry out a change of type '{kind}'. Running "
+                    "plugins and anything else outside the approved set has its own "
+                    "endpoint."
+                )
+
+        if problems:
+            raise ProposalError(
+                "This proposal was refused when it was re-checked against the safety "
+                "rules, so nothing was applied: " + " ".join(problems),
+                400,
+            )
+        return validated
+
+    async def reject_proposal(
+        self, proposal_id: str, rejected_by: str = "operator"
+    ) -> Dict[str, Any]:
+        """Reject a stored proposal and forget it. Nothing is applied."""
+        if not isinstance(proposal_id, str) or not proposal_id.strip():
+            raise ProposalError(
+                "A proposal id is required. Use the id from the command response, or "
+                "GET /api/v1/proposals to see what is waiting.",
+                400,
+            )
+        proposal_id = proposal_id.strip()
+        proposal = self._pending_proposals.pop(proposal_id, None)
+        if proposal is None:
+            raise ProposalError(
+                "There is no proposal waiting with that id. It may already have been "
+                "approved, rejected or expired. GET /api/v1/proposals lists what is "
+                "waiting.",
+                404,
+            )
+
+        if proposal.is_expired():
+            await self._write_audit(
+                action="proposal_expired",
+                input_data={
+                    "proposal_id": proposal_id,
+                    "changes": proposal.changes,
+                    "change_hash": proposal.change_hash,
+                },
+                output_data={"status": "expired", "attempted_by": rejected_by},
+                reasoning="An expired proposal was rejected. Nothing was applied.",
+                risk_level="low",
+                approved_by=None,
+            )
+            raise ProposalError(
+                "That proposal had already expired, so there was nothing to reject. "
+                "Nothing was applied. Please issue the command again if you still want "
+                "the change.",
+                410,
+            )
+
+        await self._write_audit(
+            action="command_rejected",
+            input_data={
+                "proposal_id": proposal_id,
+                "changes": proposal.changes,
+                "change_hash": proposal.change_hash,
+                "requested_by": proposal.requested_by,
+            },
+            output_data={"status": "rejected"},
+            reasoning="The operator rejected this proposal. Nothing was applied.",
+            risk_level="low",
+            approved_by=rejected_by,
+        )
+        return {
+            "status": "rejected",
+            "proposal_id": proposal_id,
+            "message": "Changes rejected. Nothing was applied.",
+        }
+
+    async def approve_proposal(
+        self, proposal_id: str, approved_by: str = "operator"
     ) -> Dict[str, Any]:
         """
-        Apply pre-approved changes.
+        Apply a proposal that *this process* stored, and nothing else.
 
-        Runtime actions execute. Configuration proposals are recorded as approved
-        and returned with the exact values to apply out of band.
+        The caller supplies an id, never a change list: the operator approves a
+        message they were shown, so if the request body could supply the list the
+        approval would be meaningless. The stored proposal is re-checked against
+        the frozen-key rules, the bounds and the change-type allowlist, its
+        fingerprint must still match, it must not have expired, and it can be used
+        only once.
+
+        Raises :class:`ProposalError` (already audited) when an approval cannot be
+        honoured. Nothing is applied unless every check passes.
         """
-        result = await self._apply_changes(changes)
+        if not isinstance(proposal_id, str) or not proposal_id.strip():
+            raise ProposalError(
+                "A proposal id is required. Approving means naming the proposal you "
+                "were shown - use the id from the command response, or "
+                "GET /api/v1/proposals.",
+                400,
+            )
+        proposal_id = proposal_id.strip()
 
-        await self.audit.log(
-            plugin="nl_config",
-            action="command_approved",
-            user_initiated=True,
-            input_data={"changes": changes},
-            output_data=result,
-            decision_reasoning=(
-                "Operator approved the proposed changes. Runtime actions were executed; "
-                "configuration proposals still require a Swarm config update and redeploy."
+        # Single use, from the very first moment: the proposal is removed before
+        # any await, so two simultaneous approvals cannot both apply it, and a
+        # replay finds nothing.
+        proposal = self._pending_proposals.pop(proposal_id, None)
+        if proposal is None:
+            raise ProposalError(
+                "There is no proposal waiting with that id. It may already have been "
+                "approved, rejected or expired - each proposal can be used once. "
+                "GET /api/v1/proposals lists what is waiting.",
+                404,
+            )
+
+        if proposal.is_expired():
+            await self._write_audit(
+                action="proposal_expired",
+                input_data={
+                    "proposal_id": proposal_id,
+                    "changes": proposal.changes,
+                    "change_hash": proposal.change_hash,
+                },
+                output_data={"status": "expired", "attempted_by": approved_by},
+                reasoning=(
+                    "An approval arrived after the proposal had expired, so it was "
+                    "refused. Nothing was applied."
+                ),
+                risk_level="high",
+                approved_by=None,
+            )
+            raise ProposalError(
+                "That proposal expired and can no longer be approved. Nothing was "
+                "applied. If you still want the change, please issue the command again "
+                "and approve the new proposal promptly.",
+                410,
+            )
+
+        # Fingerprint check: proves the list being applied is the list that was
+        # stored and shown.
+        recomputed = _hash_changes(proposal.changes)
+        if not secrets.compare_digest(recomputed, proposal.change_hash):
+            await self._write_audit(
+                action="proposal_refused",
+                input_data={
+                    "proposal_id": proposal_id,
+                    "changes": proposal.changes,
+                    "stored_hash": proposal.change_hash,
+                    "recomputed_hash": recomputed,
+                },
+                output_data={"status": "refused", "reason": "fingerprint_mismatch"},
+                reasoning=(
+                    "The stored proposal no longer matches its own fingerprint, so it "
+                    "cannot be trusted and was refused. Nothing was applied."
+                ),
+                risk_level="high",
+                approved_by=None,
+            )
+            raise ProposalError(
+                "This proposal does not match its own fingerprint, so it cannot be "
+                "trusted. Nothing was applied, and the proposal has been discarded. "
+                "Please issue the command again.",
+                409,
+            )
+
+        # Re-run the safety rules against the stored list. Validation happens
+        # again here, not only at propose time.
+        try:
+            validated = self._validate_stored_changes(proposal.changes, proposal_id)
+        except ProposalError as e:
+            await self._write_audit(
+                action="proposal_refused",
+                input_data={
+                    "proposal_id": proposal_id,
+                    "changes": proposal.changes,
+                    "change_hash": proposal.change_hash,
+                    "requested_by": proposal.requested_by,
+                },
+                output_data={"status": "refused", "reason": e.message},
+                reasoning=(
+                    "The stored proposal failed the safety checks when it was "
+                    "re-checked at approval time, so nothing was applied."
+                ),
+                risk_level="high",
+                approved_by=None,
+            )
+            raise
+
+        # The approval decision itself is recorded BEFORE anything is applied, so
+        # an approval that then fails part way through still leaves a record of
+        # what was authorised, by whom.
+        audited = await self._write_audit(
+            action="proposal_approved",
+            input_data={
+                "proposal_id": proposal_id,
+                "changes": validated,
+                "change_hash": proposal.change_hash,
+                "requested_by": proposal.requested_by,
+                "requested_at": _iso(proposal.created_at),
+                "intent": proposal.intent,
+            },
+            output_data={"status": "approved_pending_apply"},
+            reasoning=(
+                "Operator approved this stored proposal. The change list applied is "
+                "the stored, re-validated list - not anything from the request body."
             ),
             risk_level="high",
             approved_by=approved_by,
         )
+        if not audited:
+            raise ProposalError(
+                "The approval could not be written to the audit log, so nothing was "
+                "applied. The proposal has been discarded; please issue the command "
+                "again once the audit log is working.",
+                503,
+            )
+
+        result = await self._apply_changes(
+            validated,
+            approved_by=approved_by,
+            proposal_id=proposal_id,
+            source="approval",
+        )
+        result["proposal_id"] = proposal_id
+        result["approved_by"] = approved_by
+        result["requested_by"] = proposal.requested_by
         return result
 
+    async def approve_and_apply(
+        self, changes: List[Dict[str, Any]], approved_by: str = "operator"
+    ) -> Dict[str, Any]:
+        """
+        Removed as an entry point; kept only so that anything still calling it
+        fails closed with an explanation instead of applying a change list.
+
+        This used to apply whatever list it was given. A request body could
+        therefore approve changes that were never proposed - including an
+        instruction to set ``dry_run`` to false - and the audit log recorded it as
+        a normal operator approval. Approvals now name a stored proposal
+        (:meth:`approve_proposal`); a caller-supplied list cannot be applied at
+        all.
+        """
+        await self._write_audit(
+            action="approval_refused",
+            input_data={"changes": changes, "attempted_by": approved_by},
+            output_data={"status": "refused", "reason": "caller_supplied_change_list"},
+            reasoning=(
+                "An attempt was made to apply a caller-supplied change list. Approvals "
+                "must name a stored proposal, so this was refused and nothing was "
+                "applied."
+            ),
+            risk_level="high",
+            approved_by=None,
+        )
+        raise ProposalError(
+            "Changes can no longer be applied from a request body. Approving means "
+            "sending back the proposal_id you were given: POST /api/v1/approve with "
+            '{"proposal_id": "...", "approve": true}. GET /api/v1/proposals lists the '
+            "proposals that are waiting.",
+            400,
+        )
+
     async def shutdown(self) -> None:
+        if self._pending_proposals:
+            self.logger.info(
+                "Discarding %d pending proposal(s) on shutdown; they are in memory "
+                "only and must be re-issued after a restart.",
+                len(self._pending_proposals),
+            )
+            self._pending_proposals.clear()
         self.logger.info("Natural language config plugin shut down")

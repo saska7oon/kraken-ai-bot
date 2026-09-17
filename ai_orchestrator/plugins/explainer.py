@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional
 from ai_orchestrator.core.freqtrade_api import FreqtradeAPIError, Trade
 from ai_orchestrator.core.notifier import DiscordNotifier
 from ai_orchestrator.core.openrouter_client import AIBudgetExhausted
+from ai_orchestrator.core.strategy_inspector import read_strategy_protections
 from ai_orchestrator.core.plugin_manager import BasePlugin, PluginConfig
 
 logger = logging.getLogger(__name__)
@@ -169,13 +170,26 @@ class ExplainerPlugin(BasePlugin):
 
         # Protections and safety posture are the most important thing for a
         # novice to see, so report them explicitly rather than burying them.
+        #
+        # Protections are NOT in the config any more: freqtrade 2026.x rejects a
+        # `protections` key there and requires a @property on the strategy. The
+        # REST API does not expose them either, so the strategy source is the
+        # only place to read them. Reading config["protections"] here would
+        # always come back empty and make the digest announce that no safety net
+        # exists while several were active - see core/strategy_inspector.py.
         try:
             cfg = await self.freqtrade.get_config()
-            facts["protections"] = cfg.get("protections", [])
             facts["stoploss"] = cfg.get("stoploss")
             facts["max_open_trades_config"] = cfg.get("max_open_trades")
+            facts["strategy_name"] = cfg.get("strategy")
         except FreqtradeAPIError:
-            facts["protections"] = None
+            facts["stoploss"] = None
+            facts["strategy_name"] = None
+
+        facts["protections"] = read_strategy_protections(
+            facts.get("strategy_name") or "",
+        )
+        facts["protections_source"] = "strategy:protections" if facts["protections"] is not None else None
 
         autonomous = self.orchestrator.plugins.get("autonomous_agent")
         facts["autonomous_trading_enabled"] = bool(
@@ -424,14 +438,22 @@ def _deterministic_digest(facts: Dict[str, Any]) -> str:
     lines.append("------")
     protections = facts.get("protections")
     if protections:
-        lines.append(f"Protections active: {len(protections)}")
+        names = ", ".join(
+            sorted({str(p.get("method", "unknown")) for p in protections})
+        )
+        lines.append(
+            f"Protections active: {len(protections)} ({names}) - these pause "
+            f"trading automatically when losses start to pile up."
+        )
     elif protections == []:
         lines.append(
             "WARNING: no trade protections are configured. Nothing would "
             "automatically halt trading if losses pile up."
         )
     else:
-        lines.append("Protections: could not be read.")
+        lines.append(
+            "Protections: could not be read (unknown, not confirmed absent)."
+        )
 
     stoploss = facts.get("stoploss")
     if stoploss is not None:

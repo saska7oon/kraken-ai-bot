@@ -25,9 +25,69 @@ env:
   IMAGE_BACKUP: ${{ github.repository_owner }}/kraken-backup
 
 jobs:
+  # ==========================================================================
+  # VALIDATION GATE
+  # ==========================================================================
+  # Runs before every build. Nothing is published if the configuration would
+  # not start the bot, or if the strategy validator can be bypassed.
+  #
+  # This exists because the project has already shipped two fatal configuration
+  # faults that only appeared at container start-up: a YAML config (Freqtrade
+  # has no YAML support) and a `protections` key in the config (Freqtrade
+  # 2026.x rejects it). Both were invisible until runtime. A failing check here
+  # is far cheaper than a bot that will not boot.
+  validate:
+    name: Validate config and strategies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      # The validator tests are pure stdlib, so they always run.
+      - name: Strategy safety validator (48 cases)
+        run: |
+          cd ai_orchestrator/tests
+          python3 -c "
+          import sys, pathlib
+          sys.path.insert(0, '.')
+          exec(compile(pathlib.Path('test_proposal_validator.py').read_text(),
+                       'test', 'exec'),
+               {'__name__': '__main__',
+                '__file__': 'test_proposal_validator.py'})
+          "
+
+      - name: Plugin scheduler (cron parsing)
+        run: python3 ai_orchestrator/tests/test_plugin_scheduler.py
+
+      - name: Configuration preflight
+        run: python3 tools/preflight_config.py
+
+      # Fetch the exact Freqtrade source this project targets and validate the
+      # merged configuration against its OWN JSON schema - not a copy of it.
+      - name: Fetch Freqtrade 2026.8 for its real schema
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/ft.tar.gz \
+            https://github.com/freqtrade/freqtrade/archive/refs/tags/2026.8.tar.gz
+          mkdir -p /tmp/ftsrc
+          tar -xzf /tmp/ft.tar.gz -C /tmp/ftsrc --strip-components=1
+
+      - name: Validate config against Freqtrade's real schema
+        run: |
+          python3 tools/validate_against_schema.py --freqtrade-src /tmp/ftsrc
+
   build-orchestrator:
     name: Build AI Orchestrator
     runs-on: ubuntu-latest
+    needs: validate
     permissions:
       contents: read
       packages: write
@@ -85,6 +145,7 @@ jobs:
   build-backup:
     name: Build Backup Sidecar
     runs-on: ubuntu-latest
+    needs: validate
     permissions:
       contents: read
       packages: write

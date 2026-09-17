@@ -42,6 +42,33 @@ class TestStrat(IStrategy):
 
     def populate_exit_trend(self, dataframe, metadata):
         return dataframe
+
+    # Protections are compulsory since Freqtrade 2026.x moved them from the
+    # config onto the strategy. A valid strategy now means one that carries its
+    # own circuit breakers, so the fixture has to include them - otherwise every
+    # "this should pass" case below would fail on protections_missing.
+    @property
+    def protections(self):
+        return [
+            {
+                "method": "MaxDrawdown",
+                "lookback_period_candles": 288,
+                "trade_limit": 10,
+                "stop_duration_candles": 288,
+                "max_allowed_drawdown": 0.10,
+            },
+            {
+                "method": "StoplossGuard",
+                "lookback_period_candles": 96,
+                "trade_limit": 3,
+                "stop_duration_candles": 96,
+                "only_per_pair": False,
+            },
+            {
+                "method": "CooldownPeriod",
+                "stop_duration_candles": 12,
+            },
+        ]
 '''
 
 _ROI_LINE = '    minimal_roi = {"0": 0.04, "60": 0.02}'
@@ -131,6 +158,98 @@ MUST_BLOCK: Cases = [
     ("no stoploss at all", BASE.replace("    stoploss = -0.08\n", ""), "stoploss_missing"),
 ]
 
+# --------------------------------------------------------------------------
+# Regression tests for the adversarial audit.
+#
+# Every case below was a CONFIRMED, executed bypass or a confirmed silent
+# safety gap. They are grouped here so a future change that reopens one of them
+# fails loudly in CI rather than quietly in production - where the consequence
+# is arbitrary code running in the container that holds the Kraken API key.
+# --------------------------------------------------------------------------
+_BASE_NO_PROTECTIONS = BASE[: BASE.index("    # Protections are compulsory")]
+
+
+def _swap_protections(replacement: str) -> str:
+    """Replace the fixture's protections property with something else."""
+    start = BASE.index("    # Protections are compulsory")
+    return BASE[:start] + replacement
+
+
+AUDIT_REGRESSIONS: Cases = [
+    # -- F2: validator bypasses that computed a forbidden name at runtime -----
+    (
+        "getattr(__builtins__,'ev'+'al')",
+        add_class_attr("    x = getattr(__builtins__, 'ev'+'al')"),
+        "dunder_not_allowed",
+    ),
+    (
+        "builtins.__dict__['__imp'+'ort__']",
+        "import builtins\n" + BASE,
+        "import_not_allowed",
+    ),
+    (
+        "open(''.join(chr(c) for c in [...]))",
+        add_class_attr("    open(''.join(chr(c) for c in [47,114,117,110]))"),
+        "forbidden_name",
+    ),
+    (
+        "getattr(object,'__subcl'+'asses__')()",
+        add_class_attr("    getattr(object, '__subcl'+'asses__')()"),
+        "dunder_not_allowed",
+    ),
+    ("import io", "import io\n" + BASE, "import_not_allowed"),
+    ("relative import", "from .helpers import thing\n" + BASE, "relative_import"),
+    # -- F2: the primitive that defeated every name-based check --------------
+    ("getattr", add_class_attr("    x = getattr(y, 'z')"), "forbidden_name"),
+    ("open", add_class_attr("    open('/etc/passwd')"), "forbidden_name"),
+    ("chr", add_class_attr("    chr(65)"), "forbidden_name"),
+    ("vars", add_class_attr("    vars()"), "forbidden_name"),
+    # -- F2: double underscores as ATTRIBUTE, STRING, NAME and DEF ----------
+    ("__dict__ attribute", add_class_attr("    x = self.__dict__"), "dunder_not_allowed"),
+    ("__subclasses__ as string", add_class_attr("    x = '__subclasses__'"), "dunder_not_allowed"),
+    ("__import__ as name", add_class_attr("    x = __import__"), "dunder_not_allowed"),
+    ("dunder method definition", add_class_attr("    def __init__(self):\n        pass"), "dunder_not_allowed"),
+    ("super().__init__()", add_class_attr("    x = super().__init__()"), "dunder_not_allowed"),
+    # -- F3: a generated strategy must always carry its own safety net -------
+    (
+        "protections missing entirely",
+        _BASE_NO_PROTECTIONS,
+        "protections_missing",
+    ),
+    (
+        "protections incomplete (MaxDrawdown only)",
+        _swap_protections(
+            "    @property\n"
+            "    def protections(self):\n"
+            "        return [\n"
+            '            {"method": "MaxDrawdown", "max_allowed_drawdown": 0.1}\n'
+            "        ]\n"
+        ),
+        "protections_incomplete",
+    ),
+    (
+        "protections computed at runtime",
+        _swap_protections(
+            "    @property\n"
+            "    def protections(self):\n"
+            "        return build_protections()\n"
+        ),
+        "protections_not_readable",
+    ),
+    (
+        "custom stop loss enabled",
+        add_class_attr("    use_custom_stoploss = True"),
+        "custom_stoploss_enabled",
+    ),
+    (
+        "protections as a plain attribute, not a property",
+        _swap_protections(
+            '    protections = [{"method": "MaxDrawdown"}]\n'
+        ),
+        "protections_missing",
+    ),
+]
+
 MUST_PASS: Cases = [
     ("plain valid strategy", BASE, None),
     ("CAD pairs", add_class_attr('    pairs = ["BTC/CAD", "ETH/CAD"]'), None),
@@ -184,6 +303,10 @@ def main() -> int:
     failures += _run("block", MUST_BLOCK, expect_block=True)
 
     print()
+    print("Adversarial audit regressions (must all be blocked):")
+    failures += _run("audit", AUDIT_REGRESSIONS, expect_block=True)
+
+    print()
     print("Must pass:")
     failures += _run("pass", MUST_PASS, expect_block=False)
 
@@ -203,7 +326,7 @@ def main() -> int:
     print()
     print("Invariants (every case):")
     invariant_failures: List[str] = []
-    for name, code, _ in MUST_BLOCK + MUST_PASS:
+    for name, code, _ in MUST_BLOCK + AUDIT_REGRESSIONS + MUST_PASS:
         result = validate_strategy_code(code, profile="moderate")
         if result.ok != (len(result.errors()) == 0):
             invariant_failures.append(f"{name}: ok flag disagrees with error count")
@@ -233,7 +356,7 @@ def main() -> int:
 
     print()
     print("=" * 66)
-    total = len(MUST_BLOCK) + len(MUST_PASS)
+    total = len(MUST_BLOCK) + len(AUDIT_REGRESSIONS) + len(MUST_PASS)
     if failures:
         print(f"FAILED - {len(failures)} problem(s) across {total} cases")
         for f in failures:

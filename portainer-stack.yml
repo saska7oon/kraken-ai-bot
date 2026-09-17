@@ -38,7 +38,23 @@ services:
   # Also serves FreqUI on the api_server port.
   # ---------------------------------------------------------------------------
   freqtrade:
-    image: freqtradeorg/freqtrade:stable
+    # PINNED deliberately. Do not change this back to ':stable'.
+    #
+    # ':stable' is a floating tag. Freqtrade changes its config schema between
+    # releases, and this project's configuration is validated against one exact
+    # version. With ':stable', an unrelated redeploy can silently pull a newer
+    # release whose schema rejects this config and stops the bot from starting -
+    # exactly the kind of failure that is impossible to diagnose from the logs
+    # unless you know the image moved underneath you.
+    #
+    # Everything here (config/base.json, config/freqtrade-entrypoint.sh and
+    # tools/validate_against_schema.py) is verified against 2026.8. To upgrade,
+    # change this tag, redeploy, and re-run:
+    #
+    #   python3 tools/validate_against_schema.py --freqtrade-src <that version>
+    #
+    # Do it as a deliberate step, not as a side effect of another change.
+    image: freqtradeorg/freqtrade:2026.8
 
     # Override the image ENTRYPOINT so Swarm secrets are turned into the
     # freqtrade private config before the bot starts.

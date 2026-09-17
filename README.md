@@ -198,20 +198,54 @@ Portainer with those values and redeploy. Nothing changes until you do.
 
 ### Approval flow
 
-Commands that alter behaviour return `pending_approval`. Approving records your
-decision in the audit log and returns the values to apply — it does not
-reconfigure the running bot, because it cannot:
+Commands that alter behaviour come back as `pending_approval` with a
+**`proposal_id`**. Approving names that id — you never send the change list back:
 
 ```bash
+# 1. Ask
+curl -X POST $API/api/v1/command \
+  -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"command": "make it more conservative"}'
+# -> {"status": "pending_approval", "proposal_id": "Kf3...", "expires_in_seconds": 1800, ...}
+
+# 2. See what is waiting (optional)
+curl -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" $API/api/v1/proposals
+
+# 3. Approve by id
 curl -X POST $API/api/v1/approve \
   -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"approve": true, "changes": [...]}'
+  -d '{"proposal_id": "Kf3...", "approve": true}'
 ```
 
-> The old `force: true` flag on `/api/v1/command` used to call the apply path
-> directly, silently skipping approval. It has been removed and sending it now
-> returns HTTP 422.
+To decline, send the same body with `"approve": false`.
+
+**Why the id matters.** The orchestrator stores the proposal it generated and
+applies *that stored list* — the request body cannot supply its own. This closes
+a real hole: previously `/api/v1/approve` applied whatever changes you posted, so
+a request containing `{"key": "dry_run", "value": false}` would be accepted,
+recorded as human-approved, and handed back with instructions to put it in your
+Swarm config — for a proposal that was never made.
+
+Additional properties, all of which are deliberate:
+
+| Behaviour | Why |
+|-----------|-----|
+| Proposals **expire after 30 minutes** | An approval should be a decision about something you just read, not a standing permission |
+| Each id works **once** | No replaying an approval you already used |
+| A changed list is **refused** (409) | The stored list is fingerprinted; tampering is detected, not applied |
+| Approving **re-validates** the stored changes | Frozen keys and safety bounds are enforced on approval too, not only when proposing |
+| A proposal **cannot trigger a plugin run** | Use `POST /api/v1/plugins/{name}/control` for that, explicitly |
+| Pending proposals live **in memory** | A restart discards them — it fails closed, never open |
+
+If you are labelling a shared deployment, send `X-Operator-Name: your-name` so
+the audit log records *who* approved, rather than a generic `operator`.
+
+> Two older behaviours are gone and will be refused rather than silently ignored:
+> the `force: true` flag on `/api/v1/command` (HTTP 422), and posting a `changes`
+> array to `/api/v1/approve` (HTTP 400, with a message telling you to use
+> `proposal_id`).
 
 ### Frozen settings
 
@@ -284,14 +318,33 @@ These are enforced in code, not just documented:
 
 ### Freqtrade protections (circuit breakers)
 
-Configured in `config/base.json`. These are deterministic and were previously
-**absent entirely**:
+These live on the **strategy**, in `config/strategies/moderate_multi.py`, as a
+`protections` property. They are **not** in `config/base.json` — Freqtrade 2026.x
+rejects a `protections` key there outright and refuses to start:
 
-| Protection | Effect |
-|------------|--------|
-| `MaxDrawdown` | Stops trading for 24h if the account loses >10% in a day |
-| `StoplossGuard` | Pauses all trading if 3 trades hit their stop loss within 8h |
-| `CooldownPeriod` | Waits 1h after an exit before opening a new trade |
+```
+Configuration error: DEPRECATED: Setting 'protections' in the configuration is deprecated.
+```
+
+So if you want to change a circuit breaker, edit the strategy, not the config.
+
+| Protection | Setting | Effect |
+|------------|---------|--------|
+| `MaxDrawdown` | 288 candles (~24h), 10% | Stops trading for ~24h if the account loses >10% from its peak |
+| `StoplossGuard` | 96 candles (~8h), 3 trades | Pauses all trading if 3 trades hit their stop loss within ~8h |
+| `CooldownPeriod` | 12 candles (~1h) | Waits ~1h after an exit before opening a new trade |
+
+Candle counts are on the 5m timeframe, so 288 candles ≈ 24h, 96 ≈ 8h, 12 ≈ 1h.
+
+**Any strategy the AI generates must define all three.** The safety validator
+rejects a proposal without them (`protections_missing`), because a strategy with
+no circuit breakers looks perfectly healthy right up until a bad streak empties
+the account. You can confirm what is actually armed at any time:
+
+```bash
+curl -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
+  http://<pi-ip>:8082/api/v1/safety
+```
 
 ### AI failure is not a trading failure
 
@@ -305,8 +358,22 @@ in Python.
 
 ## 🤖 What the AI is actually for
 
-The AI **explains and suggests**. It does not decide trades and cannot change
-the bot's configuration.
+The AI **explains, and writes strategies for you**. It does not decide trades,
+and it cannot change the *running* bot's configuration.
+
+That last point is a limitation of Freqtrade, not a policy choice: Freqtrade has
+no API for changing its configuration while running, and these config files are
+mounted read-only from Docker Swarm configs. So there are exactly two things the
+AI can genuinely change, and both are deliberate:
+
+1. **Strategies.** It can write a new one for you to review and activate. This is
+   the "configuration" it is really for — see the workflow below.
+2. **Which pairs trade** (narrowing only). It can restrict trading to fewer of
+   your approved pairs. It can never add a pair that is not already approved.
+
+Everything else — risk settings, stop loss, position size — comes back as a
+**proposal with exact values** that you apply yourself by editing the Swarm
+config and redeploying. Nothing changes until you do.
 
 | Plugin | Schedule | Cost | What it does |
 |--------|----------|------|--------------|
@@ -321,6 +388,89 @@ Total scheduled AI usage is well under the 200 requests/day free-tier cap. The
 `market_analyst` plugin previously ran every 15 minutes and asked a model to
 re-derive indicators Python had already computed — roughly 96 requests/day for
 no additional signal. That is now zero.
+
+---
+
+## 🧭 Getting the AI to adjust your strategy
+
+This is the part to actually use. You do not need to read or write Python.
+
+### "What is it doing right now?"
+
+```bash
+curl -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
+  http://<pi-ip>:8082/api/v1/explain/digest
+```
+
+Plain-language summary of what the bot did, what the numbers mean, and whether
+anything needs attention. Costs nothing — it is computed in Python and only
+narrated by the model.
+
+### "What are the market conditions?"
+
+```bash
+curl -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
+  http://<pi-ip>:8082/api/v1/plugins/market_analyst/control \
+  -H 'Content-Type: application/json' \
+  -d '{"action": "run"}'
+```
+
+Computes RSI, MACD, Bollinger Bands, ATR, trend and a market regime
+(`trending_up` / `trending_down` / `ranging` / `volatile`) across 5m, 1h, 4h and
+1d candles, per pair. No AI cost.
+
+### "Make me a strategy for these conditions"
+
+```bash
+curl -H "Authorization: Bearer $ORCHESTRATOR_TOKEN" \
+  http://<pi-ip>:8082/api/v1/plugins/strategy_generator/control \
+  -H 'Content-Type: application/json' \
+  -d '{"action": "run"}'
+```
+
+The model writes candidate strategies from the live market data and your actual
+trade history. **Every candidate must clear three gates before you ever see it:**
+
+1. The safety validator — correct interface, plain numeric stop loss, sane risk
+   bounds, no dangerous code, and all three circuit breakers present.
+2. A real backtest over ~180 days.
+3. Minimum trades, profit, Sharpe and maximum drawdown thresholds.
+
+A proposal that fails any gate is discarded and never shown to you. Survivors are
+written to `proposal_<timestamp>_<name>.py` with a header explaining what they do.
+
+### Turning a proposal on
+
+Activating one is a deliberate two-step, and it should be:
+
+1. **Read the header** of the proposal file. It states in plain language what the
+   strategy does and that a backtest is a simulation against *past* prices — a
+   good backtest is not a promise.
+2. Point the Swarm config at it: change `--strategy` in the `freqtrade` service
+   (and `freqtrade_strategy` config) from `ModerateMultiPairStrategy` to the new
+   class name, then redeploy.
+
+If you are unsure, leave it. The running strategy already has circuit breakers.
+
+### Adjusting the running strategy without the AI
+
+Edit `config/strategies/moderate_multi.py`, recreate the `freqtrade_strategy`
+Swarm config, and redeploy. The settings worth knowing:
+
+| Setting | What it means |
+|---------|---------------|
+| `stoploss` | How much one trade can lose before it closes automatically. `-0.08` = 8%. |
+| `minimal_roi` | Take profit at these levels, e.g. `{"0": 0.04}` = sell at +4%. |
+| `timeframe` | Candle size. `5m` = decisions every 5 minutes. |
+| `protections` | The circuit breakers. Keep all three. |
+
+### A note on honesty
+
+The bot will not tell you it can predict prices, because it cannot and neither
+can anything else. Its job is to follow deterministic rules you can inspect,
+explain them in plain language, and stop trading when things go wrong. Treat the
+dry-run period as the lesson: watch what it does, read the digest, and only
+consider live money once you understand *why* it makes the trades it makes.
 
 ---
 

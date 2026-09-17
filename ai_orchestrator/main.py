@@ -14,19 +14,30 @@ Security model
 * There is no way to skip human approval. The old ``force`` flag on
   ``/api/v1/command`` used to call ``approve_and_apply`` directly, silently
   bypassing the approval gate; it has been removed and is now rejected.
+* **An approval names a stored proposal.** ``/api/v1/approve`` takes a
+  ``proposal_id`` that this process issued when the command was interpreted, and
+  applies the change list stored under it - never a list from the request body.
+  A request body used to be able to approve changes that were never proposed,
+  including an instruction to set ``dry_run`` to false, and the audit log
+  recorded it as an ordinary operator approval. Proposals are single-use, expire
+  after 30 minutes, and are re-validated before they are applied.
+* **The caller is identified.** ``approved_by`` in the audit log carries the
+  authenticated operator name (see ``ORCHESTRATOR_OPERATOR_NAME`` and the
+  ``X-Operator-Name`` header), not a hardcoded literal.
 * The orchestrator never holds Kraken credentials - only the Freqtrade REST API
   password.
 """
 
 import logging
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, Header, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,7 +49,9 @@ from ai_orchestrator.core.freqtrade_api import (
     UnsupportedOperation,
 )
 from ai_orchestrator.core.openrouter_client import OpenRouterClient
+from ai_orchestrator.core.strategy_inspector import read_strategy_protections
 from ai_orchestrator.core.plugin_manager import PluginManager
+from ai_orchestrator.plugins.nl_config import ProposalError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,12 +101,82 @@ API_TOKEN = read_secret("orchestrator_api_token")
 # ============================================================
 bearer_scheme = HTTPBearer(auto_error=False)
 
+# Who to record in the audit log when the caller does not say. This used to be a
+# hardcoded "operator", so every entry looked identical and the audit trail could
+# not answer the one question that matters after an incident: who did this?
+OPERATOR_NAME_HEADER = "X-Operator-Name"
+
+# A name is copied into the audit log, so it is restricted to characters that are
+# safe to store and read: letters, digits, space, dot, dash, underscore, plus and
+# at-sign. Anything else (control characters, newlines, quotes) is discarded
+# rather than stored, because an audit log that can be written into is not an
+# audit log.
+_OPERATOR_NAME_RE = re.compile(r"^[A-Za-z0-9 ._+@-]{1,64}$")
+
+_configured_operator_name = os.environ.get("ORCHESTRATOR_OPERATOR_NAME", "").strip()
+if _configured_operator_name and not _OPERATOR_NAME_RE.match(_configured_operator_name):
+    # The environment value is checked with the same rule as the header: it ends
+    # up in the audit log too, so it must be safe to store.
+    logger.warning(
+        "ORCHESTRATOR_OPERATOR_NAME contains characters that are not allowed in an "
+        "audit log entry; using 'operator' instead."
+    )
+    _configured_operator_name = ""
+DEFAULT_OPERATOR_NAME = _configured_operator_name or "operator"
+
+
+def resolve_operator_name(supplied: Optional[str]) -> str:
+    """
+    Decide which operator name to attribute an authenticated action to.
+
+    The name is a label, not a credential: the bearer token is what grants
+    access. So an unusable name is not an error - it just falls back to the
+    configured default, with a warning, rather than failing a legitimate request.
+    """
+    if supplied is None or not str(supplied).strip():
+        return DEFAULT_OPERATOR_NAME
+    candidate = str(supplied).strip()
+    if not _OPERATOR_NAME_RE.match(candidate):
+        logger.warning(
+            "Ignoring an unusable %s header value (%d characters); using the "
+            "default operator name instead.",
+            OPERATOR_NAME_HEADER,
+            len(candidate),
+        )
+        return DEFAULT_OPERATOR_NAME
+    return candidate
+
+
+def _token_matches(supplied: str, expected: str) -> bool:
+    """
+    Constant-time bearer-token comparison, on bytes.
+
+    The token is compared as UTF-8 bytes on both sides. The old code passed the
+    two ``str`` objects straight to :func:`secrets.compare_digest`, which raises
+    ``TypeError: comparing strings with non-ASCII characters is not supported``
+    for a non-ASCII credential - so a junk token produced an HTTP 500 instead of
+    a 401. That failed closed, but it was noisy, and a noisy auth path is one
+    people learn to ignore.
+
+    Any encoding problem is treated as "does not match", never as an error and
+    never as a match.
+    """
+    try:
+        return secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+    except (UnicodeEncodeError, UnicodeDecodeError, AttributeError, TypeError) as e:
+        logger.warning("Bearer token could not be compared as bytes (%s); rejected.", e)
+        return False
+
 
 async def require_api_token(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+    x_operator_name: Optional[str] = Header(default=None, alias=OPERATOR_NAME_HEADER),
 ) -> str:
     """
     Validate the bearer token against the Swarm secret.
+
+    Returns the authenticated operator name, so routes can record who acted
+    instead of a hardcoded literal.
 
     Fails closed: with no token configured, no authenticated route works.
     """
@@ -115,14 +198,14 @@ async def require_api_token(
         )
 
     # Constant-time comparison so the token cannot be guessed byte by byte.
-    if not secrets.compare_digest(credentials.credentials, API_TOKEN):
+    if not _token_matches(credentials.credentials, API_TOKEN):
         raise HTTPException(
             status_code=401,
             detail="Invalid bearer token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return "operator"
+    return resolve_operator_name(x_operator_name)
 
 
 # ============================================================
@@ -221,7 +304,9 @@ app.add_middleware(
     allow_origins=_allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "Content-Type"],
+    # X-Operator-Name is the optional attribution label used for the audit log.
+    # Without it here, a browser client could not send it at all.
+    allow_headers=["Authorization", "Content-Type", OPERATOR_NAME_HEADER],
 )
 
 
@@ -245,13 +330,39 @@ class CommandResponse(BaseModel):
     message: Optional[str] = None
     result: Optional[dict] = None
     approval_required: Optional[bool] = None
+    # The id the operator must send back to approve. Without it in the response
+    # there would be nothing to approve by name, which is the whole point of
+    # binding an approval to a stored proposal.
+    proposal_id: Optional[str] = None
+    expires_at: Optional[str] = None
+    expires_in_seconds: Optional[int] = None
 
 
 class ApprovalRequest(BaseModel):
+    """
+    The body of an approval.
+
+    ``proposal_id`` names the proposal this process stored when it interpreted
+    the operator's command; the stored change list is what gets applied.
+
+    ``changes`` is accepted by the schema only so that a caller still using the
+    old body shape gets a clear, actionable error instead of a confusing 422.
+    It is never applied - see the route below.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     approve: bool
-    changes: list
+    proposal_id: Optional[str] = Field(
+        default=None,
+        description="Id of the stored proposal to approve, from the command response",
+    )
+    changes: Optional[list] = Field(
+        default=None,
+        description=(
+            "Not accepted. Approving applies the stored proposal; send proposal_id."
+        ),
+    )
 
 
 class PluginControlRequest(BaseModel):
@@ -326,13 +437,29 @@ async def safety_posture(_: str = Depends(require_api_token)):
         "notes": [],
     }
 
+    strategy_name = None
     if freqtrade_client:
         try:
             cfg = await freqtrade_client.get_config()
             posture["dry_run"] = bool(cfg.get("dry_run", True))
-            posture["protections"] = cfg.get("protections", [])
+            strategy_name = cfg.get("strategy")
         except FreqtradeAPIError as e:
             posture["notes"].append(f"Could not read bot config: {e}")
+
+    # Protections live on the strategy, not in the config. Freqtrade 2026.x
+    # rejects a `protections` config key outright, and the REST API does not
+    # expose them, so the strategy source is the only source of truth. Reading
+    # config["protections"] here would always be empty and would raise a false
+    # "no trade protections are configured" alarm - the single most damaging
+    # thing this endpoint could get wrong, because it would teach the operator
+    # to distrust the safety report.
+    #
+    # None means "could not determine", [] means "genuinely none configured".
+    posture["protections"] = read_strategy_protections(strategy_name or "")
+    posture["protections_source"] = (
+        "strategy:protections" if posture["protections"] is not None else None
+    )
+    posture["strategy_name"] = strategy_name
 
     if plugin_manager:
         info = plugin_manager.get_all_status().get("autonomous_agent")
@@ -346,23 +473,27 @@ async def safety_posture(_: str = Depends(require_api_token)):
         posture["notes"].append(
             "WARNING: the bot is in LIVE mode and can place real orders with real money."
         )
-    if not posture["protections"]:
+    if posture["protections"] == []:
         posture["notes"].append(
             "WARNING: no trade protections are configured. Consider MaxDrawdown, "
             "StoplossGuard and CooldownPeriod."
         )
+    elif posture["protections"] is None:
+        posture["notes"].append(
+            "Protections could not be read from the strategy, so their status is "
+            "unknown. This is NOT a confirmation that none are configured."
+        )
     return posture
 
 
-@app.post("/api/v1/command", response_model=CommandResponse)
-async def process_command(
-    request: CommandRequest, _: str = Depends(require_api_token)
-):
+def get_nl_plugin():
     """
-    Interpret a natural-language command.
+    The natural language config plugin, or a clear 503.
 
-    Changes that affect trading always come back with approval_required=true.
-    There is intentionally no way to auto-approve them.
+    Also checks that the plugin exposes the proposal API this version of the
+    routes needs. A partially upgraded deployment (old plugin, new routes) must
+    answer with an explanation rather than a 500 or, worse, an approval that
+    quietly applies something.
     """
     if not plugin_manager:
         raise HTTPException(status_code=503, detail="Plugin manager not initialized")
@@ -371,7 +502,39 @@ async def process_command(
     if not nl_plugin:
         raise HTTPException(status_code=503, detail="NL config plugin not loaded")
 
-    result = await nl_plugin.process_command(request.command, request.user_id)
+    for method in ("approve_proposal", "reject_proposal", "list_pending_proposals"):
+        if not callable(getattr(nl_plugin, method, None)):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The NL config plugin does not support proposal-based approvals, "
+                    "so approvals are disabled. Update the orchestrator so the API and "
+                    "the plugin are the same version."
+                ),
+            )
+    return nl_plugin
+
+
+@app.post("/api/v1/command", response_model=CommandResponse)
+async def process_command(
+    request: CommandRequest, user: str = Depends(require_api_token)
+):
+    """
+    Interpret a natural-language command.
+
+    Changes that affect trading always come back with approval_required=true and a
+    ``proposal_id``. There is intentionally no way to auto-approve them: the
+    proposal id is what the operator sends back, and it is the only thing that can
+    authorise the stored change list.
+    """
+    nl_plugin = get_nl_plugin()
+
+    # ``actor`` is the authenticated operator name, taken from the token (plus the
+    # optional name header). It is authoritative for the audit log and the
+    # proposal record; the body's user_id is only a label the caller supplied.
+    result = await nl_plugin.process_command(
+        request.command, request.user_id, actor=user
+    )
     return CommandResponse(**result)
 
 
@@ -379,29 +542,82 @@ async def process_command(
 async def approve_changes(
     request: ApprovalRequest, user: str = Depends(require_api_token)
 ):
-    """Approve or reject previously proposed changes."""
-    if not plugin_manager:
-        raise HTTPException(status_code=503, detail="Plugin manager not initialized")
+    """
+    Approve or reject a proposal that this service previously stored.
 
-    nl_plugin = plugin_manager.plugins.get("nl_config")
-    if not nl_plugin:
-        raise HTTPException(status_code=503, detail="NL config plugin not loaded")
+    The request body names a proposal; it can never supply the changes. The
+    operator approves a rendered message, so if the machine applied a list from
+    the body the approval would mean nothing - which is exactly what used to
+    happen: ``{"approve": true, "changes": [{"key": "dry_run", "value": false}]}``
+    was accepted, audited as an approval, and handed back as an instruction to go
+    live, without anything ever having been proposed.
 
-    if not request.approve:
-        await audit_logger.log(
-            plugin="nl_config",
-            action="command_rejected",
-            user_initiated=True,
-            input_data={"changes": request.changes},
-            output_data={"status": "rejected"},
-            decision_reasoning="Operator rejected the proposed changes",
-            risk_level="low",
-            approved_by=user,
+    The stored proposal is re-validated (frozen keys, bounds, change types),
+    checked against its fingerprint, checked for expiry, and consumed exactly
+    once. Any failure is a refusal, never a partial application.
+    """
+    nl_plugin = get_nl_plugin()
+
+    # The legacy shape is refused explicitly, with a message that says what to do
+    # instead. It is checked first so that an old client gets this explanation
+    # rather than a bare "field required".
+    if request.changes is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Changes can no longer be sent with an approval. Approving means "
+                "naming the proposal you were shown: send "
+                '{"proposal_id": "...", "approve": true}, using the proposal_id from '
+                "the command response. GET /api/v1/proposals lists what is waiting."
+            ),
         )
-        return {"status": "rejected", "message": "Changes rejected. Nothing was applied."}
 
-    result = await nl_plugin.approve_and_apply(request.changes, approved_by=user)
+    if not request.proposal_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A proposal_id is required. Run the command first, then approve it "
+                'with {"proposal_id": "...", "approve": true}. '
+                "GET /api/v1/proposals lists what is waiting for approval."
+            ),
+        )
+
+    try:
+        if not request.approve:
+            return await nl_plugin.reject_proposal(
+                request.proposal_id, rejected_by=user
+            )
+
+        result = await nl_plugin.approve_proposal(
+            request.proposal_id, approved_by=user
+        )
+    except ProposalError as e:
+        # The plugin has already audited the refusal; the operator gets the same
+        # plain-language reason over HTTP.
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
     return {"status": "approved", "result": result}
+
+
+@app.get("/api/v1/proposals")
+async def list_proposals(_: str = Depends(require_api_token)):
+    """
+    List the proposals waiting for approval.
+
+    This exists so the operator can see what is actually queued - the change
+    list, who asked for it, when it expires and its fingerprint - instead of
+    having to trust a chat message. Read-only: it cannot approve anything.
+    """
+    nl_plugin = get_nl_plugin()
+    proposals = nl_plugin.list_pending_proposals()
+    return {
+        "pending": len(proposals),
+        "proposals": proposals,
+        "note": (
+            "Each proposal can be approved once, using its proposal_id, before it "
+            "expires. Approving applies exactly the change list shown here."
+        ),
+    }
 
 
 @app.post("/api/v1/explain/ask")

@@ -362,26 +362,95 @@ class StrategyGeneratorPlugin(BasePlugin):
             return []
 
     def _get_system_prompt(self) -> str:
-        return """You are an expert quantitative trading strategy developer.
-Generate Python trading strategies for Freqtrade (freqtrade.io) that trade CAD pairs on Kraken Canada.
+        """Instructions for the model, including the rules it cannot see.
 
-REQUIREMENTS:
-1. Strategies must inherit from freqtrade.strategy.IStrategy
-2. Use only spot trading (no margin/futures - Canadian regulations)
-3. Target moderate risk: 5-10% per trade, 8-12% stoploss
-4. Include proper risk management (position sizing, stoploss, trailing stop)
-5. Use technical indicators: EMA, RSI, MACD, Bollinger Bands, ADX, Volume
-6. Implement populate_indicators, populate_entry_trend, populate_exit_trend
-7. Include hyperopt parameters for optimization
-8. Code must be production-ready with proper error handling
+        The validator rejects a generated strategy for several reasons that are
+        invisible from the outside: a hard import allowlist, a ban on double
+        underscores, a required ``protections`` property, and a ban on custom
+        stop losses. A model that does not know these rules will violate them
+        constantly, every proposal will be rejected, and the feature will look
+        broken to the operator while actually working exactly as designed.
 
-OUTPUT FORMAT: JSON with "strategies" array, each containing:
-- "name": strategy class name
-- "description": what the strategy does
-- "code": complete Python code as string
-- "parameters": key hyperparameters
-- "risk_level": "low"|"moderate"|"high"
-- "suitable_pairs": list of pairs this strategy works best on"""
+        So the rules are stated explicitly, and a complete working template is
+        supplied. A model that copies the template produces a valid strategy;
+        free-tier models in particular produce far more usable output from a
+        concrete example than from a list of prohibitions.
+        """
+        return '''You are an expert quantitative trading strategy developer.
+Generate Python trading strategies for Freqtrade that trade CAD pairs on Kraken Canada.
+The operator is a beginner who does not read code, so strategies must be simple,
+conservative, and easy to explain.
+
+HARD RULES. A strategy that breaks any of these is rejected automatically and never
+shown to the operator, so follow them exactly.
+
+RULE 1 - PROTECTIONS ARE COMPULSORY.
+Every strategy MUST define a "protections" property returning a plain list that
+includes all three of MaxDrawdown, StoplossGuard and CooldownPeriod. It must be a
+literal list - do NOT call a function or build it in a loop. Copy this block
+verbatim and adjust the numbers if you have a reason to:
+
+    @property
+    def protections(self):
+        return [
+            {
+                "method": "MaxDrawdown",
+                "lookback_period_candles": 288,
+                "trade_limit": 10,
+                "stop_duration_candles": 288,
+                "max_allowed_drawdown": 0.10,
+            },
+            {
+                "method": "StoplossGuard",
+                "lookback_period_candles": 96,
+                "trade_limit": 3,
+                "stop_duration_candles": 96,
+                "only_per_pair": False,
+            },
+            {
+                "method": "CooldownPeriod",
+                "stop_duration_candles": 12,
+            },
+        ]
+
+RULE 2 - NO CUSTOM STOP LOSS.
+Do NOT set "use_custom_stoploss = True" and do NOT define a "custom_stoploss"
+method. Use a plain numeric "stoploss" between -0.02 and -0.15. A custom stop loss
+is code-driven, so nobody can say in advance how much a trade could lose, and it
+is rejected.
+
+RULE 3 - ONLY THESE IMPORTS.
+freqtrade, pandas, numpy, talib, technical, typing, datetime, math, statistics,
+decimal, functools, itertools, collections, dataclasses, enum, warnings, logging.
+Importing anything else - including os, sys, io, builtins or subprocess - is
+rejected. Never use relative imports.
+
+RULE 4 - NO DOUBLE UNDERSCORES ANYWHERE.
+No name, attribute, method or string may contain "__". That covers __init__,
+__dict__, __import__ and super().__init__(). Write plain code without them.
+
+RULE 5 - PLAIN ATTRIBUTES AND METHODS ONLY.
+INTERFACE_VERSION must be 3. Define stoploss, timeframe and minimal_roi as
+plain literal values. Implement populate_indicators, populate_entry_trend and
+populate_exit_trend with exactly the signature (self, dataframe, metadata).
+Use only spot long trading: never set leverage, margin_mode, trading_mode or
+can_short.
+
+RULE 6 - MODERATE RISK.
+Aim for a stop loss of -0.08 to -0.12, sensible minimal_roi, and simple,
+well-understood indicators (EMA, RSI, MACD, Bollinger Bands, ADX, volume).
+Prefer few, clear conditions over many stacked ones.
+
+OUTPUT FORMAT - a JSON object with a "strategies" array. Each entry must have:
+- "name": the strategy class name (letters, digits and underscores only)
+- "description": one or two plain sentences a non-expert can understand
+- "code": the complete Python source as a string
+- "parameters": the key tunable values
+- "risk_level": "low", "moderate" or "high"
+- "suitable_pairs": list of pairs, e.g. ["BTC/CAD"]
+
+The "code" string must contain the entire file: imports, the class, the
+protections property, and all three populate_ methods.'''
 
     def _build_generation_prompt(self, market_context: Dict, performance: Dict) -> str:
         pairs_info = "\n".join([
@@ -403,7 +472,7 @@ CURRENT PERFORMANCE:
 - Total Profit: {current_perf.get('total_profit', 0):.2f} CAD
 - Avg Win Rate: {current_perf.get('avg_win_rate', 0):.1f}%
 - Active Strategies: {len(current_strategies)}
-{chr(10).join([f'- {s["name"]}: WR={s["win_rate"]:.1f}%, Profit={s["total_profit"]:.2f}, Sharpe={s["sharpe"]:.2f}' for s in current_strategies])}
+{self._format_current_strategies(current_strategies)}
 
 RISK PROFILE: {self.risk_profile}
 TARGET: Strategies that complement existing ones, address weaknesses, adapt to current market regime.
@@ -414,6 +483,39 @@ Focus on:
 3. Volatility-adjusted position sizing
 4. Canadian market hours considerations
 5. Kraken-specific pair characteristics (BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD)"""
+
+    @staticmethod
+    def _format_current_strategies(current_strategies: List[Dict[str, Any]]) -> str:
+        """Render the current-strategy lines for the generation prompt.
+
+        This used to be an inline f-string referencing ``s["sharpe"]``, a key
+        ``_get_strategy_performance`` has never produced. Because the reference
+        sat inside the f-string's expression, every run raised
+        ``KeyError: 'sharpe'`` and the generator never produced a single
+        strategy - the entire feature was dead on arrival.
+
+        Two lessons are baked in here:
+        * Only reference fields that are actually produced, and read them with
+          ``.get()`` so a future shape change degrades the prompt instead of
+          killing the run.
+        * A metric the model is not given cannot be invented by it. We pass what
+          we measure (trades, win rate, profit) rather than a plausible-looking
+          label we do not have.
+        """
+        if not current_strategies:
+            return "- (no closed trades yet - this is a fresh deployment)"
+
+        lines = []
+        for strategy in current_strategies:
+            name = strategy.get("name") or "unknown"
+            trades = strategy.get("total_trades", 0)
+            win_rate = strategy.get("win_rate", 0.0)
+            profit = strategy.get("total_profit", 0.0)
+            lines.append(
+                f"- {name}: {trades} closed trades, "
+                f"WR={float(win_rate):.1f}%, Profit={float(profit):.2f}"
+            )
+        return "\n".join(lines)
 
     async def _validate_proposal(self, proposal: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -615,36 +717,104 @@ Focus on:
             ),
         }
 
+    @staticmethod
+    def _comment_line(label: str, value: Any) -> str:
+        """Render one piece of untrusted metadata as a single, inescapable comment.
+
+        This is the fix for a real remote-code-execution hole. The header used to be
+        an f-string that interpolated the model's text straight into a triple-quoted
+        docstring. A description containing three consecutive double-quote characters
+        closed that docstring, and every character after it became module-level
+        Python. Because this file is written into the very directory Freqtrade imports
+        strategies from, the payload executed *inside the container holding the Kraken
+        API key and secret*.
+
+        A verified payload set description to: three double-quotes, then a newline,
+        then ``import os`` and an ``os.system`` call that read the private config,
+        then three more double-quotes. It compiled cleanly and passed the strategy
+        validator, because the validator only ever inspected the ``code`` field, and
+        that field was entirely clean.
+
+        Two properties make this version safe:
+
+        * ``json.dumps`` escapes every control character, so the output is guaranteed
+          to contain no newline and no quote break-out.
+        * A ``#`` comment can only be terminated by a newline, and there are none.
+
+        So there is no string the model can emit that escapes the comment, regardless
+        of what the validator does or does not catch.
+        """
+        return f"# {label}: {json.dumps(str(value))}"
+
     async def _save_proposal(self, proposal: Dict[str, Any]) -> Path:
         """
         Write a candidate strategy into the shared strategies volume.
 
         Files are named 'proposal_<timestamp>_<name>.py' so a generated file can
         never overwrite or shadow the operator's own strategy.
+
+        Metadata is emitted as comments, never as a docstring or any other
+        executable construct - see ``_comment_line`` for why that distinction is
+        load-bearing. The final file text is validated as a whole, because
+        validating only ``proposal['code']`` is exactly the gap that allowed the
+        header to smuggle code.
         """
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         safe_name = re.sub(r"[^A-Za-z0-9_]", "_", proposal["name"])
         filename = f"proposal_{timestamp}_{safe_name}.py"
         filepath = self.generated_dir / filename
 
-        header = f'''"""
-AI-GENERATED STRATEGY PROPOSAL - NOT ACTIVE
+        suitable_pairs = proposal.get("suitable_pairs") or []
+        if isinstance(suitable_pairs, (str, bytes)):
+            suitable_pairs = [suitable_pairs]
 
-Name: {proposal['name']}
-Generated: {datetime.utcnow().isoformat()}Z
-Description: {proposal['description']}
-Risk Level: {proposal['risk_level']}
-Suitable Pairs: {', '.join(proposal['suitable_pairs'])}
-Parameters: {json.dumps(proposal['parameters'], indent=2)}
+        header = "\n".join(
+            [
+                "# " + "=" * 74,
+                "# AI-GENERATED STRATEGY PROPOSAL - NOT ACTIVE",
+                "# " + "=" * 74,
+                self._comment_line("Name", proposal.get("name", "")),
+                self._comment_line("Generated", f"{datetime.utcnow().isoformat()}Z"),
+                self._comment_line("Risk level", proposal.get("risk_level", "")),
+                self._comment_line("Description", proposal.get("description", "")),
+                self._comment_line("Suitable pairs", ", ".join(map(str, suitable_pairs))),
+                self._comment_line("Parameters", json.dumps(proposal.get("parameters", {}))),
+                "#",
+                "# Produced by an AI model and passed an automated validator plus a",
+                "# backtest. No human has reviewed it and it is NOT running.",
+                "# Activating it requires editing the Swarm config and redeploying.",
+                "# " + "=" * 74,
+                "",
+                "",
+            ]
+        )
 
-This file was produced by an AI model. It has passed an automated safety
-validator and a backtest, but it has not been reviewed by a human and it is
-NOT running. Activating it requires editing the Swarm config and redeploying.
-"""
+        file_text = header + proposal["code"]
 
-'''
+        # Validate the assembled artifact, not just the model-supplied body. The
+        # header is now comment-only by construction, but checking the whole file
+        # means any future change to how the header is built is still caught.
+        final_result = validate_strategy_code(
+            file_text,
+            profile=self.risk_profile,
+            max_stoploss=self.max_stoploss,
+            min_stoploss=self.min_stoploss,
+        )
+        if not final_result.ok:
+            messages = [i.message for i in final_result.errors()]
+            self.logger.error(
+                "Refusing to write proposal '%s': the assembled file failed "
+                "validation: %s",
+                proposal.get("name"),
+                messages,
+            )
+            raise ValueError(
+                "Generated strategy file failed validation and was not written: "
+                + "; ".join(messages)
+            )
+
         async with aiofiles.open(filepath, "w") as f:
-            await f.write(header + proposal["code"])
+            await f.write(file_text)
 
         self.logger.info("Saved strategy proposal: %s", filepath)
         return filepath

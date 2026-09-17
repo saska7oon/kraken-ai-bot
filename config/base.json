@@ -82,6 +82,16 @@
     "amend_last_stake_amount": true,
     "last_stake_amount_min_ratio": 0.5,
 
+    // Position adjustment lets a strategy add to an existing trade. The
+    // strategy does not implement it, and it MUST be present here: freqtrade
+    // reads it with a direct subscript in rpc_manager.startup_messages:
+    //
+    //     pos_adjust_enabled = "On" if config["position_adjustment_enable"] else "Off"
+    //
+    // There is no schema default, so leaving it out is a KeyError during
+    // startup - after the exchange has already been constructed and validated.
+    "position_adjustment_enable": false,
+
     // -------------------------------------------------------------------------
     // RISK MANAGEMENT (moderate profile)
     // -------------------------------------------------------------------------
@@ -101,6 +111,45 @@
         "30": 0.02,
         "60": 0.01,
         "120": 0
+    },
+
+    // -------------------------------------------------------------------------
+    // PRICING
+    // -------------------------------------------------------------------------
+    // entry_pricing and exit_pricing are REQUIRED keys. They are listed in
+    // SCHEMA_TRADE_REQUIRED in freqtrade/config_schema/config_schema.py, and
+    // freqtrade reads them with direct subscripting rather than .get():
+    //
+    //     self.validate_pricing(config["exit_pricing"])
+    //     self.validate_pricing(config["entry_pricing"])
+    //
+    // so omitting them is not a warning, it is a KeyError that kills startup.
+    // Freqtrade can migrate them from the old bid_strategy / ask_strategy
+    // blocks, but only when one of those legacy blocks exists. With neither
+    // present, nothing creates them.
+    //
+    // price_side selects which side of the spread is used to price an order:
+    //   "ask" / "bid"  always that side
+    //   "same"         the side the order is on
+    //   "other"        the opposite side
+    // "same" is freqtrade's documented default and what its own example config
+    // uses, so it is the best-tested path. The schema requires price_side in
+    // both blocks.
+    "entry_pricing": {
+        "price_side": "same",
+        "use_order_book": true,
+        "order_book_top": 1,
+        "price_last_balance": 0.0,
+        "check_depth_of_market": {
+            "enabled": false,
+            "bids_to_ask_delta": 1
+        }
+    },
+    "exit_pricing": {
+        "price_side": "same",
+        "use_order_book": true,
+        "order_book_top": 1,
+        "price_last_balance": 0.0
     },
 
     // -------------------------------------------------------------------------
@@ -141,27 +190,99 @@
     // and tradable_balance_ratio instead.
 
     // -------------------------------------------------------------------------
-    // TELEGRAM (disabled)
+    // TELEGRAM
     // -------------------------------------------------------------------------
-    "telegram": {
-        "enabled": false
-    },
+    // Deliberately absent. This bot notifies through Discord, and a `telegram`
+    // block is not safe to include just to say it is off: the schema requires
+    // token AND chat_id whenever the block exists, so
+    //
+    //     "telegram": {"enabled": false}
+    //
+    // fails config validation with "missing required property 'token'" and stops
+    // the bot from starting. To enable Telegram, add all three of enabled,
+    // token and chat_id.
 
     // -------------------------------------------------------------------------
     // DISCORD
     // webhook_url is injected from the Swarm secret by the entrypoint.
+    //
+    // Every key here maps to an RPCMessageType, and freqtrade reads it as a LIST
+    // OF FIELD TEMPLATES, not a boolean:
+    //
+    //     if fields := self._config["discord"].get(msg["type"].value):
+    //         for f in fields:
+    //             for k, v in f.items():
+    //                 v.format(**msg)
+    //
+    // So "entry_fill": true is wrong twice over. The schema declares these as
+    // arrays, so a boolean fails config validation outright; and if it somehow
+    // got through, `for f in True` would raise TypeError when a message fired.
+    //
+    // A message type must be omitted entirely to disable it: any truthy value is
+    // iterated. The {braces} are substituted from the message payload, so every
+    // placeholder below is a key that the corresponding message really carries.
     // -------------------------------------------------------------------------
     "discord": {
         "enabled": true,
-        "entry_fill": true,
-        "exit_fill": true,
-        "entry_cancel": true,
-        "exit_cancel": true,
-        "protection_trigger": true,
-        "protection_trigger_global": true,
-        "status": true,
-        "warning": true,
-        "startup": true
+
+        // Trade opened / closed: full detail, matching freqtrade's schema defaults.
+        "entry_fill": [
+            {"Trade ID": "{trade_id}"},
+            {"Exchange": "{exchange}"},
+            {"Pair": "{pair}"},
+            {"Direction": "{direction}"},
+            {"Open rate": "{open_rate}"},
+            {"Amount": "{amount}"},
+            {"Open date": "{open_date:%Y-%m-%d %H:%M:%S}"},
+            {"Enter tag": "{enter_tag}"},
+            {"Strategy": "{strategy} {timeframe}"}
+        ],
+        "exit_fill": [
+            {"Trade ID": "{trade_id}"},
+            {"Exchange": "{exchange}"},
+            {"Pair": "{pair}"},
+            {"Direction": "{direction}"},
+            {"Open rate": "{open_rate}"},
+            {"Close rate": "{close_rate}"},
+            {"Amount": "{amount}"},
+            {"Open date": "{open_date:%Y-%m-%d %H:%M:%S}"},
+            {"Close date": "{close_date:%Y-%m-%d %H:%M:%S}"},
+            {"Profit": "{profit_amount} {stake_currency}"},
+            {"Profitability": "{profit_ratio:.2%}"},
+            {"Enter tag": "{enter_tag}"},
+            {"Exit Reason": "{exit_reason}"},
+            {"Strategy": "{strategy}"},
+            {"Timeframe": "{timeframe}"}
+        ],
+
+        // An order that timed out and was cancelled. These payloads carry pair,
+        // limit and stake amount but none of the fill fields.
+        "entry_cancel": [
+            {"Pair": "{pair}"},
+            {"Limit": "{limit}"},
+            {"Amount": "{stake_amount} {stake_currency}"}
+        ],
+        "exit_cancel": [
+            {"Pair": "{pair}"},
+            {"Limit": "{limit}"}
+        ],
+
+        // status, warning and startup each carry a single "status" string.
+        "status": [{"Status": "{status}"}],
+        "warning": [{"Warning": "{status}"}],
+        "startup": [{"Status": "{status}"}],
+
+        // Circuit breakers. The payload is a PairLock, which provides pair,
+        // reason and lock_end_time.
+        "protection_trigger": [
+            {"Pair": "{pair}"},
+            {"Reason": "{reason}"},
+            {"Unlocks": "{lock_end_time}"}
+        ],
+        "protection_trigger_global": [
+            {"Reason": "{reason}"},
+            {"Unlocks": "{lock_end_time}"}
+        ]
     },
 
     // -------------------------------------------------------------------------

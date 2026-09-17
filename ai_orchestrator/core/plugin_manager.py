@@ -241,21 +241,108 @@ class PluginManager:
                 if not info.is_running:
                     asyncio.create_task(self._run_plugin(name))
 
+    @staticmethod
+    def _cron_field_matches(spec: str, value: int, low: int, high: int) -> bool:
+        """Match one cron field against a value.
+
+        Supports the four forms that actually appear in cron files:
+        ``*`` (any), ``N`` (exact), ``*/N`` (every N), ``A-B`` (range),
+        ``A-B/N`` (stepped range) and comma-separated lists of any of those.
+
+        This replaces a version that did ``int(field)`` directly, which raised
+        ``ValueError: invalid literal for int() with base 10: '*/6'`` on the
+        ``param_optimizer`` schedule (``0 */6 * * *``). The scheduler caught it
+        per-plugin, so the symptom was not a crash but a plugin that silently
+        never ran - harder to notice, and the operator has no way to tell a
+        plugin that is idle by design from one that is broken.
+        """
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+
+            step = 1
+            if "/" in part:
+                part, _, step_text = part.partition("/")
+                try:
+                    step = int(step_text)
+                except ValueError:
+                    continue
+                if step <= 0:
+                    continue
+
+            if part in ("*", ""):
+                start, end = low, high
+            elif "-" in part:
+                start_text, _, end_text = part.partition("-")
+                try:
+                    start, end = int(start_text), int(end_text)
+                except ValueError:
+                    continue
+            else:
+                try:
+                    start = end = int(part)
+                except ValueError:
+                    continue
+
+            if start <= value <= end and (value - start) % step == 0:
+                return True
+        return False
+
     def _should_run(self, schedule: str, now: datetime, last_run: Optional[datetime]) -> bool:
-        """Check if plugin should run based on cron schedule."""
-        # Simple cron: "minute hour * * *"
+        """Check whether a plugin should run, given its cron schedule.
+
+        All five fields are honoured. The previous version checked only minute
+        and hour and ignored day, month and weekday entirely, which meant
+        ``"0 2 * * 0"`` (intended: Sundays only) actually fired EVERY day at
+        02:00 - seven times the intended AI spend, on a free tier with a daily
+        request cap. A schedule that silently means something other than what it
+        says is worse than a schedule that fails loudly.
+        """
         parts = schedule.split()
         if len(parts) != 5:
+            logger.warning(
+                "Plugin schedule %r is not a 5-field cron expression; it will "
+                "never run. Expected 'minute hour day month weekday'.",
+                schedule,
+            )
             return False
 
-        minute_spec, hour_spec = parts[0], parts[1]
+        minute_spec, hour_spec, dom_spec, month_spec, dow_spec = parts
 
-        # Check minute
-        if minute_spec != "*" and int(minute_spec) != now.minute:
+        if not self._cron_field_matches(minute_spec, now.minute, 0, 59):
+            return False
+        if not self._cron_field_matches(hour_spec, now.hour, 0, 23):
+            return False
+        if not self._cron_field_matches(month_spec, now.month, 1, 12):
             return False
 
-        # Check hour
-        if hour_spec != "*" and int(hour_spec) != now.hour:
+        # Cron's day-of-month / day-of-week rule: when BOTH are restricted, the
+        # match succeeds if EITHER does. When only one is restricted, only that
+        # one is checked. Getting this backwards would silently change how often
+        # a plugin runs, so it is spelled out rather than assumed.
+        dom_restricted = dom_spec.strip() != "*"
+        dow_restricted = dow_spec.strip() != "*"
+
+        # Python's weekday(): Monday=0. Cron's: Sunday=0. Sunday must be 0 or 7.
+        cron_dow = (now.weekday() + 1) % 7
+
+        if dom_restricted and dow_restricted:
+            day_matches = self._cron_field_matches(
+                dom_spec, now.day, 1, 31
+            ) or self._cron_field_matches(dow_spec, cron_dow, 0, 6) or (
+                cron_dow == 0 and self._cron_field_matches(dow_spec, 7, 0, 7)
+            )
+        elif dom_restricted:
+            day_matches = self._cron_field_matches(dom_spec, now.day, 1, 31)
+        elif dow_restricted:
+            day_matches = self._cron_field_matches(
+                dow_spec, cron_dow, 0, 6
+            ) or (cron_dow == 0 and self._cron_field_matches(dow_spec, 7, 0, 7))
+        else:
+            day_matches = True
+
+        if not day_matches:
             return False
 
         # Check if already run this minute

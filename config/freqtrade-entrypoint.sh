@@ -126,19 +126,68 @@ def read_secret(name: str) -> str:
 
 
 api_password = read_secret("freqtrade_api_password")
+encrypt_key = read_secret("freqtrade_encrypt_key") or api_password
+
+
+def jwt_key_from(secret: str) -> str:
+    """Return a jwt_secret_key that satisfies the schema's 32-character minimum.
+
+    freqtrade's config schema declares api_server.jwt_secret_key with
+    minLength 32, so a shorter secret fails config validation and the bot will
+    not start. Repeating the secret is enough to satisfy the length rule, but it
+    adds NO entropy - an 8-character secret repeated four times is still an
+    8-character secret to anyone attacking it. So this is a compatibility shim,
+    not a security measure, and it says so out loud rather than quietly making a
+    weak key look strong.
+    """
+    if not secret:
+        # Both secrets were empty. The required-secret check upstream should
+        # already have aborted, but never emit an empty signing key.
+        import secrets as _secrets
+
+        sys.stderr.write(
+            "[entrypoint] WARNING: no encrypt key or api password available; "
+            "generated a random jwt_secret_key. Sessions will not survive a "
+            "restart.\n"
+        )
+        return _secrets.token_urlsafe(48)
+
+    if len(secret) < 32:
+        sys.stderr.write(
+            "[entrypoint] WARNING: freqtrade_encrypt_key is only %d characters, "
+            "but freqtrade requires at least 32 for api_server.jwt_secret_key. "
+            "It has been repeated to satisfy the schema, which does NOT make it "
+            "stronger - please replace the secret with a longer random value.\n"
+            % len(secret)
+        )
+        repeats = (32 // len(secret)) + 1
+        return (secret * repeats)[:64]
+
+    return secret[:64]
+
 
 cfg = {
     "exchange": {
         "key": read_secret("kraken_api_key"),
         "secret": read_secret("kraken_api_secret"),
     },
+    # jwt_secret_key and ws_token live INSIDE api_server, not at the top level.
+    # freqtrade reads them from the api_server section:
+    #
+    #     api_auth.py:  secret_jwt_key = api_config["jwt_secret_key"]
+    #                   api_config = config["api_server"]
+    #
+    # and the config schema lists jwt_secret_key under api_server's required
+    # keys. A top-level jwt_secret_key therefore does both wrong things at once:
+    # it fails schema validation during startup, and it leaves
+    # api_config["jwt_secret_key"] to raise KeyError when FreqUI or the
+    # orchestrator authenticates.
     "api_server": {
         "username": "freqtrade",
         "password": api_password,
+        "jwt_secret_key": jwt_key_from(encrypt_key),
+        "ws_token": encrypt_key,
     },
-    # jwt_secret_key / ws_token authenticate FreqUI and the websocket.
-    "jwt_secret_key": read_secret("freqtrade_encrypt_key") or api_password,
-    "ws_token": read_secret("freqtrade_encrypt_key") or api_password,
 }
 
 webhook = read_secret("discord_webhook")
