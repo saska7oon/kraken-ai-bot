@@ -20,7 +20,20 @@ import pathlib
 import sys
 from typing import Callable, List, Tuple
 
-from ai_orchestrator.core.proposal_validator import validate_strategy_code
+# Locate the repository root from this file's own location rather than trusting
+# the caller's working directory.
+#
+# This test used to assume the repo root was already on sys.path. CI runs it
+# after `cd ai_orchestrator/tests` with only `.` inserted, so `import
+# ai_orchestrator` raised ModuleNotFoundError, the validate job failed, and -
+# because build-orchestrator declares `needs: validate` - the container image
+# was never rebuilt. The visible symptom was a deployed bot serving
+# {"detail":"Not Found"} at /: the UI route existed in the repository but not in
+# the image that was actually running. A test that only passes from one
+# directory is a trap; this one now runs from anywhere.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
+from ai_orchestrator.core.proposal_validator import validate_strategy_code  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Fixtures

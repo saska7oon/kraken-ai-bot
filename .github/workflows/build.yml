@@ -52,17 +52,34 @@ jobs:
         run: python3 -m pip install --quiet pyyaml
 
       # The validator tests are pure stdlib, so they always run.
+      #
+      # Run plainly from the repo root. This step used to `cd ai_orchestrator/tests`
+      # and put only `.` on sys.path, which made `import ai_orchestrator` fail.
+      # That failed the whole validate job, and because build-orchestrator
+      # declares `needs: validate`, the container image was never rebuilt: the
+      # fix was in the repository but not in the running container. The visible
+      # symptom was a deployed bot answering {"detail":"Not Found"} at /, because
+      # the UI route existed in git but not in the image that was serving traffic.
       - name: Strategy safety validator (48 cases)
+        run: python3 ai_orchestrator/tests/test_proposal_validator.py
+
+      # Guard the class of bug, not just its instance. Every test here locates
+      # the repo root from its own __file__; if one ever regresses to trusting
+      # the caller's working directory, running the suite from elsewhere catches
+      # it here rather than in a build that silently never happens.
+      - name: Suite has no working-directory assumptions
         run: |
-          cd ai_orchestrator/tests
-          python3 -c "
-          import sys, pathlib
-          sys.path.insert(0, '.')
-          exec(compile(pathlib.Path('test_proposal_validator.py').read_text(),
-                       'test', 'exec'),
-               {'__name__': '__main__',
-                '__file__': 'test_proposal_validator.py'})
-          "
+          set -euo pipefail
+          for t in ai_orchestrator/tests/test_*.py; do
+            (
+              cd /tmp
+              python3 "$GITHUB_WORKSPACE/$t"
+            ) >/dev/null 2>&1 || {
+              echo "::error file=$t::$t only passes from one working directory" \
+                   "but the repository root must not be assumed"
+              exit 1
+            }
+          done
 
       - name: Plugin scheduler (cron parsing)
         run: python3 ai_orchestrator/tests/test_plugin_scheduler.py

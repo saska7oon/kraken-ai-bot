@@ -28,6 +28,7 @@ Security model
   password.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -269,10 +270,45 @@ async def lifespan(app: FastAPI):
     await plugin_manager.initialize()
     await plugin_manager.start_scheduler()
 
-    if await freqtrade_client.health_check():
-        logger.info("Freqtrade connection OK")
+    # Wait for Freqtrade to become reachable, rather than checking once and
+    # declaring failure.
+    #
+    # In a Swarm stack both containers start together and freqtrade is far
+    # slower: it loads ccxt, resolves the strategy, validates its config and
+    # syncs wallets before its API server binds. A single check therefore failed
+    # on every ordinary startup and logged "Cannot reach the Freqtrade API.
+    # Check the API password secret." - naming the one thing that was fine,
+    # while the real cause was that the other container was not listening yet.
+    # Anyone reading that would go and re-create a secret that was never wrong.
+    #
+    # Retrying costs nothing and removes the false alarm. If it still cannot
+    # connect after the deadline, the message names both plausible causes and is
+    # then worth acting on.
+    freqtrade_ready = False
+    waited = 0.0
+    delay = 1.0
+    while waited < 90.0:
+        if await freqtrade_client.health_check():
+            freqtrade_ready = True
+            break
+        await asyncio.sleep(delay)
+        waited += delay
+        delay = min(delay * 1.5, 5.0)
+
+    if freqtrade_ready:
+        logger.info(
+            "Freqtrade connection OK%s",
+            "" if waited == 0 else f" (waited {waited:.0f}s for it to start)",
+        )
     else:
-        logger.error("Cannot reach the Freqtrade API. Check the API password secret.")
+        logger.error(
+            "Freqtrade API still unreachable after %.0fs. Either the bot is "
+            "taking longer than usual to start, or 'freqtrade_api_password' "
+            "does not match the api_server password in the generated private "
+            "config. The orchestrator's views will show no data until this "
+            "resolves, and it will retry on each request.",
+            waited,
+        )
 
     logger.info("AI Orchestrator started")
     yield

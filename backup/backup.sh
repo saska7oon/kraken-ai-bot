@@ -63,10 +63,18 @@ error() {
 }
 
 # Never print secret values - only the fact that a secret file was found.
+#
+# The trailing newline that secret-creation tooling leaves behind is NOT a
+# problem here: every caller assigns through $(...), which strips trailing
+# newlines already. This strips a trailing CR and any leading/trailing spaces
+# as well, which $(...) does not do - a CRLF-formatted secret file, or a value
+# pasted with an accidental trailing space, produces an rclone config that is
+# wrong in a way nothing displays. It is cheap insurance, not the fix for the
+# upload failure that prompted it.
 load_secret() {
     local file="$1"
     if [[ -f "$file" ]]; then
-        cat "$file"
+        tr -d '\r' < "$file" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
     else
         error "Secret file not found: $file"
         return 1
@@ -143,8 +151,40 @@ EOF
 
     log "rclone configured for Nextcloud"
 
-    rclone mkdir "nextcloud:backups" 2>/dev/null || true
-    rclone mkdir "$BACKUP_REMOTE_DIR" 2>/dev/null || true
+    # Probe the remote before doing any work, and report what rclone actually
+    # says when it fails.
+    #
+    # Both mkdir calls used to discard stderr and force success with
+    # `|| true`, so a bad URL or wrong app password produced no message at all.
+    # The first sign of trouble was the copy failing minutes later with
+    # "Failed to upload archive to Nextcloud" and no reason. An operator cannot
+    # fix a credential problem they cannot see, and "it failed" is not a
+    # diagnosis.
+    #
+    # The URL is deliberately not printed: it can embed a username. The shape
+    # is echoed instead, which is enough to spot the common mistake of pointing
+    # nextcloud_url at a folder that already ends in /backups while
+    # BACKUP_REMOTE_DIR also starts with backups/.
+    log "WebDAV target shape: $(printf '%s' "$url" | sed -e 's#^\(https\?://\)#\1#' -e 's#/[^/]*$#/...#') + $BACKUP_REMOTE_DIR"
+
+    local probe_err
+    if ! probe_err=$(rclone lsd "nextcloud:" 2>&1); then
+        error "Cannot reach the Nextcloud remote at all."
+        error "rclone said: ${probe_err}"
+        error "Check the nextcloud_url, nextcloud_user and nextcloud_pass secrets."
+        error "nextcloud_pass must be a Nextcloud APP password, not the account password."
+        return 1
+    fi
+
+    if ! probe_err=$(rclone mkdir "$BACKUP_REMOTE_DIR" 2>&1); then
+        error "Reached Nextcloud but could not create $BACKUP_REMOTE_DIR"
+        error "rclone said: ${probe_err}"
+        error "A 409 Conflict here usually means the parent folder does not exist."
+        return 1
+    fi
+
+    log "Remote reachable and $BACKUP_REMOTE_DIR is ready"
+    return 0
 }
 
 # ---------------------------------------------------------------- sqlite helpers
@@ -362,7 +402,16 @@ run_backup() {
         return 1
     fi
 
-    setup_rclone
+    # Stop here if the remote is unreachable. Previously this was unchecked, so
+    # a wrong URL or app password was discovered only when the upload failed at
+    # the very end - after the databases had been snapshotted and encrypted -
+    # and the message said nothing about the cause. Failing before the work
+    # means the operator gets the diagnosis immediately and nothing is left
+    # half-done.
+    if ! setup_rclone; then
+        error "Cannot use the Nextcloud remote; aborting before touching any data"
+        return 1
+    fi
 
     WORK_DIR="$BACKUP_ROOT/work"
     rm -rf "$WORK_DIR"
