@@ -44,7 +44,18 @@ has_secret() {
 }
 
 # ---------------------------------------------------------------------------
-# 1. Validate required secrets (fail fast rather than trade without keys)
+# 1. Validate secrets (fail fast rather than trade without keys)
+#
+#    Required secrets are fatal when absent: a bot with no Kraken keys cannot
+#    trade, so it is better to stop immediately and say so.
+#
+#    Optional secrets are reported for BOTH presence and absence. An earlier
+#    version printed "secret present" only for the required three and stayed
+#    silent when an optional secret was found, so the log for a healthy Discord
+#    setup was identical to the log for a missing one - you could only tell the
+#    difference by the absence of a warning. That is a bad log. Every secret the
+#    container is given is now named explicitly, and the resulting notification
+#    state is stated outright at the end.
 # ---------------------------------------------------------------------------
 missing=0
 for required in kraken_api_key kraken_api_secret freqtrade_api_password; do
@@ -62,13 +73,27 @@ if [ "$missing" -ne 0 ]; then
     exit 1
 fi
 
-if ! has_secret freqtrade_encrypt_key; then
-    log "WARNING: 'freqtrade_encrypt_key' missing - reusing api password for JWT/ws token"
+DISCORD_ENABLED=0
+
+if has_secret freqtrade_encrypt_key; then
+    log "secret present: freqtrade_encrypt_key (optional)"
+else
+    log "WARNING: 'freqtrade_encrypt_key' missing - reusing the api password for JWT/ws token"
 fi
 
-if ! has_secret discord_webhook; then
+if has_secret discord_webhook; then
+    log "secret present: discord_webhook (optional)"
+    DISCORD_ENABLED=1
+else
     log "WARNING: 'discord_webhook' missing - Discord notifications are DISABLED"
     log "         (the bot will still start; add the secret and redeploy to enable)"
+fi
+
+# State the outcome outright, so nobody has to infer it from a missing line.
+if [ "$DISCORD_ENABLED" = "1" ]; then
+    log "Discord notifications: ENABLED"
+else
+    log "Discord notifications: DISABLED (no webhook_url available)"
 fi
 
 # ---------------------------------------------------------------------------
