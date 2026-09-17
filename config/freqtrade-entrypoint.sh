@@ -171,7 +171,127 @@ fi
 chmod 0775 "${STRATEGY_DIR}" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 6. Hand over to freqtrade (command from the stack becomes "$@")
+# 6. Sanitise the mounted YAML configs.
+#
+#    These files are authored in Portainer's web editor and delivered as Swarm
+#    configs. Pasting through a browser or a word processor routinely introduces
+#    characters that are invisible on screen but fatal to a YAML parser:
+#
+#      * a UTF-8 BOM (\xef\xbb\xbf) at byte 0, which makes freqtrade fail with
+#        "Parse error at offset 0: Invalid value." while showing a first line
+#        that looks perfectly normal;
+#      * "smart" quotes (U+201C/U+201D/U+2018/U+2019) instead of straight
+#        quotes, which produce the same error at the offset of the quote;
+#      * non-breaking spaces (U+00A0) instead of ordinary spaces;
+#      * CRLF line endings.
+#
+#    None of these are visible in a diff or a browser, and the resulting error
+#    message points at a line that looks correct. Rather than requiring the
+#    operator to hunt for an invisible byte, normalise the files into tmpfs and
+#    hand freqtrade the clean copies. Anything that had to be changed is logged
+#    loudly, because a silently rewritten config would be worse than a loud one.
+# ---------------------------------------------------------------------------
+sanitise_config() {
+    local src="$1"
+    local dst="$2"
+
+    python3 - "$src" "$dst" <<'PY'
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+
+with open(src, "rb") as fh:
+    raw = fh.read()
+
+original = raw
+problems = []
+
+# Byte-level fixes first.
+if raw.startswith(b"\xef\xbb\xbf"):
+    raw = raw[3:]
+    problems.append("UTF-8 BOM at start of file")
+if b"\r\n" in raw:
+    raw = raw.replace(b"\r\n", b"\n")
+    problems.append("CRLF line endings")
+
+try:
+    text = raw.decode("utf-8")
+except UnicodeDecodeError as exc:
+    sys.stderr.write(
+        "[entrypoint] ERROR: %s is not valid UTF-8 (%s). It cannot be repaired "
+        "automatically - re-create this config in Portainer by pasting plain "
+        "text.\n" % (src, exc)
+    )
+    sys.exit(1)
+
+# Character-level fixes: the "smart punctuation" family.
+replacements = {
+    "\u201c": '"', "\u201d": '"',   # curly double quotes
+    "\u2018": "'", "\u2019": "'",   # curly single quotes
+    "\u00a0": " ",                  # non-breaking space
+    "\u2007": " ", "\u202f": " ",   # other exotic spaces
+    "\u2013": "-", "\u2014": "-",   # en/em dash
+    "\ufeff": "",                   # stray BOM mid-file
+    "\u200b": "",                   # zero-width space
+}
+for bad, good in replacements.items():
+    if bad in text:
+        text = text.replace(bad, good)
+        problems.append(
+            "U+%04X (%s)" % (ord(bad), repr(bad)[1:-1] or "zero-width")
+        )
+
+with open(dst, "w", encoding="utf-8", newline="\n") as fh:
+    fh.write(text)
+
+if problems:
+    sys.stderr.write(
+        "[entrypoint] WARNING: %s contained invisible or non-ASCII characters "
+        "that would have broken freqtrade's YAML parser. A cleaned copy was "
+        "written to %s.\n" % (src, dst)
+    )
+    for problem in problems:
+        sys.stderr.write("[entrypoint]   - repaired: %s\n" % problem)
+    sys.stderr.write(
+        "[entrypoint]   The config in Portainer is still wrong - this fix is "
+        "applied at every start. Please re-paste it as plain text.\n"
+    )
+else:
+    sys.stdout.write("[entrypoint] config clean: %s\n" % src)
+PY
+}
+
+SANITISED_ARGS=()
+for arg in "$@"; do
+    case "${arg}" in
+        # Skip anything already in tmpfs: that is our own generated private
+        # config, which is written clean by this script.
+        /dev/shm/*)
+            SANITISED_ARGS+=("${arg}")
+            ;;
+        *.yaml|*.yml|*.json)
+            if [ -f "${arg}" ]; then
+                out="/dev/shm/config-$(basename "${arg}")"
+                if sanitise_config "${arg}" "${out}"; then
+                    SANITISED_ARGS+=("${out}")
+                else
+                    # Repair failed; fall back to the original so the operator
+                    # sees freqtrade's own error rather than silence.
+                    SANITISED_ARGS+=("${arg}")
+                fi
+            else
+                SANITISED_ARGS+=("${arg}")
+            fi
+            ;;
+        *)
+            SANITISED_ARGS+=("${arg}")
+            ;;
+    esac
+done
+set -- "${SANITISED_ARGS[@]}"
+
+# ---------------------------------------------------------------------------
+# 7. Hand over to freqtrade (command from the stack becomes "$@")
 # ---------------------------------------------------------------------------
 log "starting: freqtrade $*"
 exec freqtrade "$@"
