@@ -63,6 +63,65 @@ class ModerateMultiPairStrategy(IStrategy):
     # Number of candles required before strategy produces valid signals
     startup_candle_count: int = 200
 
+    # -------------------------------------------------------------------------
+    # PROTECTIONS - automatic circuit breakers
+    # -------------------------------------------------------------------------
+    # These MUST be defined here, in the strategy, and not in the config.
+    # Freqtrade 2026.8 rejects a `protections` key in the configuration file
+    # outright:
+    #
+    #   Configuration error: DEPRECATED: Setting 'protections' in the
+    #   configuration is deprecated.
+    #
+    # (see freqtrade/configuration/deprecated_settings.py). Defining them as a
+    # @property on the strategy is the supported location, and it also means a
+    # protection travels with the strategy it protects.
+    #
+    # They are active in dry-run and live trading automatically. Backtesting and
+    # hyperopt only honour them when --enable-protections is passed.
+    #
+    # Timings are in candles. The timeframe is 5m, so:
+    #   12 candles = 1 hour, 96 = 8 hours, 288 = 24 hours.
+    #
+    # Protections are evaluated in the order defined below.
+    @property
+    def protections(self):
+        return [
+            # Stop trading entirely if the account loses more than 10% within a
+            # day. Without this, nothing stops a losing streak.
+            #
+            # calculation_mode "equity" measures real peak-to-trough drawdown on
+            # the account equity curve. The legacy "ratios" mode derives it from
+            # cumulative trade profit ratios, which drifts from the account-level
+            # figure as position sizing changes. The docs recommend "equity" for
+            # new setups.
+            {
+                "method": "MaxDrawdown",
+                "calculation_mode": "equity",
+                "lookback_period_candles": 288,   # last 24 hours
+                "trade_limit": 10,                # wait for a real sample
+                "stop_duration_candles": 288,     # then pause 24 hours
+                "max_allowed_drawdown": 0.10,     # 10%
+            },
+            # If 3 trades hit their stop loss within 8 hours, something is wrong
+            # with the market or the strategy. Pause the whole account rather
+            # than keep feeding it money.
+            {
+                "method": "StoplossGuard",
+                "lookback_period_candles": 96,
+                "trade_limit": 3,
+                "stop_duration_candles": 96,
+                "required_profit": 0.0,           # count all losing stoplosses
+                "only_per_pair": False,           # account-wide, not per pair
+            },
+            # After any exit, wait 1 hour before re-entering that pair. Prevents
+            # rapid re-entry churn, which mostly generates fees.
+            {
+                "method": "CooldownPeriod",
+                "stop_duration_candles": 12,
+            },
+        ]
+
     # Order types
     order_types = {
         "entry": "limit",

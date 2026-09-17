@@ -116,59 +116,29 @@
     "dataformat_trades": "jsongz",
 
     // -------------------------------------------------------------------------
-    // PROTECTIONS - automatic circuit breakers
+    // PROTECTIONS
     // -------------------------------------------------------------------------
-    // Freqtrade's built-in safety mechanisms. They are deterministic, tested
-    // upstream, and active in dry-run as well as live.
+    // NOT configured here. Freqtrade 2026.8 rejects a `protections` key in the
+    // configuration file:
     //
-    // The original configuration had NONE of these: if the strategy started
-    // bleeding, nothing would have stopped it. For an operator who is not a
-    // trader, these are the most valuable settings in the file.
+    //   Configuration error: DEPRECATED: Setting 'protections' in the
+    //   configuration is deprecated.
     //
-    // Timings are in candles. The timeframe is 5m, so:
-    //   12 candles = 1 hour, 96 = 8 hours, 288 = 24 hours.
-    "protections": [
-        // Stop trading entirely if the account loses more than 10% in a day.
-        {
-            "method": "MaxDrawdown",
-            "lookback_period_candles": 288,
-            "trade_limit": 10,
-            "stop_duration_candles": 288,
-            "max_allowed_drawdown": 0.10
-        },
-
-        // If 3 trades hit their stop loss within 8 hours, something is wrong
-        // with the market or the strategy. Pause all trading rather than keep
-        // feeding it money.
-        {
-            "method": "StoplossGuard",
-            "lookback_period_candles": 96,
-            "trade_limit": 3,
-            "stop_duration_candles": 96,
-            "only_per_pair": false
-        },
-
-        // After any exit, wait 1 hour before opening a new trade. Prevents
-        // rapid re-entry churn, which mostly generates fees.
-        {
-            "method": "CooldownPeriod",
-            "stop_duration_candles": 12
-        }
-    ],
+    // They are defined as a @property on the strategy instead - see
+    // config/strategies/moderate_multi.py. MaxDrawdown, StoplossGuard and
+    // CooldownPeriod are all configured there.
 
     // -------------------------------------------------------------------------
-    // EDGE (position-sizing optimiser) - off until there is trade history
+    // EDGE
     // -------------------------------------------------------------------------
-    "edge": {
-        "enabled": false,
-        "process_throttle_secs": 3600,
-        "calculate_since_number_of_days": 30,
-        "minimum_trade_history": 10,
-        "capital_available_percentage": 0.5,
-        "stoploss_range_min": -0.15,
-        "stoploss_range_max": -0.03,
-        "stoploss_range_step": 0.01
-    },
+    // NOT configured here. Freqtrade removed Edge entirely in 2025.6, and any
+    // non-empty edge block is now a hard startup error:
+    //
+    //   Configuration error: Edge is no longer supported and has been removed
+    //   from Freqtrade with 2025.6.
+    //
+    // (see config_validation.py). Position sizing is handled by stake_amount
+    // and tradable_balance_ratio instead.
 
     // -------------------------------------------------------------------------
     // TELEGRAM (disabled)

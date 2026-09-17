@@ -47,10 +47,16 @@ services:
       - trade
       # NOTE: freqtrade parses every config file with rapidjson, regardless of
       # extension. There is no YAML support. These must be .json files.
+      #
+      # Kept OUTSIDE /freqtrade/user_data on purpose. Swarm configs are mounted
+      # read-only, and freqtrade recursively chowns its user-data directory on
+      # startup, which fails against read-only files and emits
+      # "chown: ... Read-only file system" plus a "Could not chown" warning on
+      # every start. Config files are not user data, so they live in /etc.
       - --config
-      - /freqtrade/user_data/base.json
+      - /etc/freqtrade/base.json
       - --config
-      - /freqtrade/user_data/canada_kraken.json
+      - /etc/freqtrade/canada_kraken.json
       - --config
       - /dev/shm/freqtrade-private.json
       - --strategy
@@ -60,9 +66,9 @@ services:
 
     configs:
       - source: freqtrade_base_config
-        target: /freqtrade/user_data/base.json
+        target: /etc/freqtrade/base.json
       - source: freqtrade_canada_config
-        target: /freqtrade/user_data/canada_kraken.json
+        target: /etc/freqtrade/canada_kraken.json
       # Staged outside the strategies directory: Swarm configs are read-only, and
       # the entrypoint needs to be able to write AI-proposed strategies alongside
       # it. See the entrypoint's strategy-staging step.

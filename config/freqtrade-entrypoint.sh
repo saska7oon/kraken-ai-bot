@@ -67,7 +67,8 @@ if ! has_secret freqtrade_encrypt_key; then
 fi
 
 if ! has_secret discord_webhook; then
-    log "WARNING: 'discord_webhook' missing - Discord notifications will not work"
+    log "WARNING: 'discord_webhook' missing - Discord notifications are DISABLED"
+    log "         (the bot will still start; add the secret and redeploy to enable)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,23 @@ cfg = {
 webhook = read_secret("discord_webhook")
 if webhook:
     cfg["discord"] = {"webhook_url": webhook}
+else:
+    # Fail safe. The base config sets discord.enabled = true, and freqtrade's
+    # RPC manager instantiates Discord whenever that flag is set:
+    #
+    #     if config.get("discord", {}).get("enabled", False):
+    #         self.registered_modules.append(Discord(self._rpc, config))
+    #
+    # Discord.__init__ then does an unguarded lookup:
+    #
+    #     self._url = config["discord"]["webhook_url"]
+    #
+    # so an enabled Discord with no webhook_url raises KeyError and kills the
+    # bot at startup. Since this private config is merged last, it has the
+    # highest precedence, so explicitly disabling Discord here overrides the
+    # config file and the bot starts without notifications instead of not
+    # starting at all. Notifications are optional; trading is not.
+    cfg["discord"] = {"enabled": False}
 
 # Write with 0600. fchmod is applied explicitly because the O_CREAT mode is
 # ignored when the file already exists (the shell probe above creates it).
