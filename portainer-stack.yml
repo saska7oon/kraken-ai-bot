@@ -45,10 +45,12 @@ services:
     entrypoint: ["/bin/bash", "/etc/freqtrade-entrypoint.sh"]
     command:
       - trade
+      # NOTE: freqtrade parses every config file with rapidjson, regardless of
+      # extension. There is no YAML support. These must be .json files.
       - --config
-      - /freqtrade/user_data/base.yaml
+      - /freqtrade/user_data/base.json
       - --config
-      - /freqtrade/user_data/canada_kraken.yaml
+      - /freqtrade/user_data/canada_kraken.json
       - --config
       - /dev/shm/freqtrade-private.json
       - --strategy
@@ -58,9 +60,9 @@ services:
 
     configs:
       - source: freqtrade_base_config
-        target: /freqtrade/user_data/base.yaml
+        target: /freqtrade/user_data/base.json
       - source: freqtrade_canada_config
-        target: /freqtrade/user_data/canada_kraken.yaml
+        target: /freqtrade/user_data/canada_kraken.json
       # Staged outside the strategies directory: Swarm configs are read-only, and
       # the entrypoint needs to be able to write AI-proposed strategies alongside
       # it. See the entrypoint's strategy-staging step.
@@ -259,8 +261,8 @@ volumes:
 # =============================================================================
 # CONFIGS - create these in Portainer: Configs -> Add config
 # =============================================================================
-#  freqtrade_base_config     <- config/base.yaml
-#  freqtrade_canada_config   <- config/canada_kraken.yaml
+#  freqtrade_base_config     <- config/base.json
+#  freqtrade_canada_config   <- config/canada_kraken.json
 #  freqtrade_strategy        <- config/strategies/moderate_multi.py
 #  freqtrade_entrypoint      <- config/freqtrade-entrypoint.sh
 #  freqtrade_ai_config       <- config/ai_orchestrator.yaml

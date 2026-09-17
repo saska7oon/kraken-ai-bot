@@ -1,0 +1,134 @@
+// =============================================================================
+// Kraken Canada - country-specific overrides
+// =============================================================================
+// Loaded AFTER base.json, so anything here replaces the base value.
+// Contains NO secrets.
+//
+// KRAKEN CANADA CONSTRAINTS (2026)
+// Kraken Canada operates as a Registered Restricted Dealer (OSC lead, CSA).
+// Spot trading only: no margin, no futures, no derivatives, and no short
+// selling. Funding is Interac e-Transfer or wire. The pairs below are the CAD
+// markets that actually exist on the Canadian venue.
+//
+// WHY JSON AND NOT YAML:
+// Freqtrade parses every config file with rapidjson regardless of extension,
+// so comments must be // or /* */, never #.
+// =============================================================================
+{
+    "exchange": {
+        "name": "kraken",
+
+        "ccxt_async_config": {
+            "enableRateLimit": true,
+            // Kraken is strict about request rates. ~3.5s between calls keeps
+            // the bot well clear of the rate limiter.
+            "rateLimit": 3500
+        },
+
+        // The four CAD spot markets in scope.
+        "pair_whitelist": [
+            "BTC/CAD",
+            "ETH/CAD",
+            "SOL/CAD",
+            "XRP/CAD"
+        ],
+
+        // Excluded deliberately.
+        //   USDC/USDT - stablecoin pairs; the bot would be trading CAD against
+        //               something designed not to move, paying fees both ways.
+        //   PEPE      - a meme token with no fundamental value.
+        //   .*/BULL, .*/BEAR, .*/HALF, .*/HEDGE - leveraged and inverse
+        //               products. Kraken Canada does not offer them, and any
+        //               pair matching these would simply fail to trade.
+        "pair_blacklist": [
+            "USDC/CAD",
+            "USDT/CAD",
+            "PEPE/CAD",
+            ".*/BULL",
+            ".*/BEAR",
+            ".*/HALF",
+            ".*/HEDGE"
+        ]
+    },
+
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
+    ],
+
+    // -------------------------------------------------------------------------
+    // ACCOUNT
+    // -------------------------------------------------------------------------
+    "stake_currency": "CAD",
+    "fiat_display_currency": "CAD",
+
+    "dry_run": true,
+    "dry_run_wallet": 1000,
+
+    // -------------------------------------------------------------------------
+    // RISK (moderate profile)
+    // -------------------------------------------------------------------------
+    // At most 3 trades at once. With 4 pairs tracked, the bot can never be
+    // fully invested in all of them, which keeps cash available.
+    "max_open_trades": 3,
+    "stake_amount": "unlimited",
+
+    // Use at most 90% of the wallet, holding 10% back.
+    "tradable_balance_ratio": 0.90,
+    "amount_reserve_percent": 0.05,
+
+    "stoploss": -0.08,
+
+    "trailing_stop": true,
+    "trailing_stop_positive": 0.02,
+    "trailing_stop_positive_offset": 0.03,
+    "trailing_only_offset_is_reached": false,
+
+    "minimal_roi": {
+        "0": 0.04,
+        "30": 0.02,
+        "60": 0.01,
+        "120": 0
+    },
+
+    // -------------------------------------------------------------------------
+    // STRATEGY (must match config/strategies/moderate_multi.py)
+    // -------------------------------------------------------------------------
+    "strategy": "ModerateMultiPairStrategy",
+
+    // -------------------------------------------------------------------------
+    // API SERVER / WEBSERVER
+    // -------------------------------------------------------------------------
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8080,
+        "verbosity": "info",
+        "enable_openapi": true,
+        "CORS_origins": [
+            "http://localhost:8082",
+            "http://127.0.0.1:8082"
+        ]
+    },
+
+    "webserver": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8081,
+        "verbosity": "info"
+    },
+
+    // -------------------------------------------------------------------------
+    // LOGGING
+    // -------------------------------------------------------------------------
+    "logging": {
+        "logfile": "/freqtrade/user_data/logs/freqtrade.log",
+        "loglevel": "INFO",
+        "logfile_level": "DEBUG",
+        "syslog": false,
+        "logrotate": true,
+        "logrotate_max_bytes": 10485760,
+        "logrotate_backup_count": 10
+    }
+}

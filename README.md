@@ -284,7 +284,7 @@ These are enforced in code, not just documented:
 
 ### Freqtrade protections (circuit breakers)
 
-Configured in `config/base.yaml`. These are deterministic and were previously
+Configured in `config/base.json`. These are deterministic and were previously
 **absent entirely**:
 
 | Protection | Effect |
@@ -377,8 +377,8 @@ kraken-ai-bot/
 ├── docker-compose.yml
 ├── .env.example
 ├── config/
-│   ├── base.yaml              # Freqtrade base config
-│   ├── canada_kraken.yaml     # Canada-specific overrides
+│   ├── base.json              # Freqtrade base config
+│   ├── canada_kraken.json     # Canada-specific overrides
 │   ├── ai_orchestrator.yaml   # AI plugin config
 │   └── strategies/
 │       └── moderate_multi.py  # Main strategy
@@ -490,7 +490,7 @@ docker run --rm -it --network kraken-bot-network curlimages/curl \
 docker compose exec freqtrade ls /run/secrets/
 
 # Test Kraken connection
-docker compose exec freqtrade freqtrade test-pairlist -c /freqtrade/user_data/config/canada_kraken.yaml
+docker compose exec freqtrade freqtrade test-pairlist -c /freqtrade/user_data/config/canada_kraken.json
 ```
 
 ---

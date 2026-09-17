@@ -171,25 +171,35 @@ fi
 chmod 0775 "${STRATEGY_DIR}" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 6. Sanitise the mounted YAML configs.
+# 6. Sanitise the mounted configs.
 #
-#    These files are authored in Portainer's web editor and delivered as Swarm
-#    configs. Pasting through a browser or a word processor routinely introduces
-#    characters that are invisible on screen but fatal to a YAML parser:
+#    Freqtrade parses every config file with rapidjson - see
+#    freqtrade/configuration/load_config.py. There is no YAML support, and the
+#    file extension is ignored entirely. rapidjson reports failures as
+#    "Parse error at offset N: <message>", which freqtrade then presents as
+#    "please verify the following segment of your configuration" - often
+#    pointing at a line that looks completely correct.
 #
-#      * a UTF-8 BOM (\xef\xbb\xbf) at byte 0, which makes freqtrade fail with
-#        "Parse error at offset 0: Invalid value." while showing a first line
-#        that looks perfectly normal;
+#    These files are authored in Portainer's web editor, and pasting through a
+#    browser or word processor routinely introduces characters that are
+#    invisible on screen but fatal to the parser:
+#
+#      * a UTF-8 BOM (\xef\xbb\xbf) at byte 0 - fails at offset 0 while the
+#        reported line looks fine;
 #      * "smart" quotes (U+201C/U+201D/U+2018/U+2019) instead of straight
-#        quotes, which produce the same error at the offset of the quote;
+#        quotes - the cause documented in freqtrade/freqtrade#3244;
 #      * non-breaking spaces (U+00A0) instead of ordinary spaces;
-#      * CRLF line endings.
+#      * CRLF line endings, which rapidjson tolerates but which are normalised
+#        here for consistency.
 #
-#    None of these are visible in a diff or a browser, and the resulting error
-#    message points at a line that looks correct. Rather than requiring the
-#    operator to hunt for an invisible byte, normalise the files into tmpfs and
-#    hand freqtrade the clean copies. Anything that had to be changed is logged
-#    loudly, because a silently rewritten config would be worse than a loud one.
+#    Rather than making the operator hunt for an invisible byte, normalise the
+#    files into tmpfs and hand freqtrade the clean copies. Anything changed is
+#    logged loudly, because a silently rewritten config would be worse than a
+#    loud one.
+#
+#    This does NOT make an invalid config valid: it only removes characters
+#    that cannot be seen. A config written in YAML syntax is still rejected,
+#    correctly, because freqtrade cannot read YAML.
 # ---------------------------------------------------------------------------
 sanitise_config() {
     local src="$1"
@@ -247,7 +257,7 @@ with open(dst, "w", encoding="utf-8", newline="\n") as fh:
 if problems:
     sys.stderr.write(
         "[entrypoint] WARNING: %s contained invisible or non-ASCII characters "
-        "that would have broken freqtrade's YAML parser. A cleaned copy was "
+        "that would have broken freqtrade's config parser. A cleaned copy was "
         "written to %s.\n" % (src, dst)
     )
     for problem in problems:
@@ -269,7 +279,31 @@ for arg in "$@"; do
         /dev/shm/*)
             SANITISED_ARGS+=("${arg}")
             ;;
-        *.yaml|*.yml|*.json)
+        # Catch the single most confusing freqtrade misconfiguration: configs
+        # written in YAML. Freqtrade has no YAML support and ignores the file
+        # extension, so it parses the file as JSON and fails with an error
+        # pointing at the first line - which is almost always a comment that
+        # looks perfectly valid. Say so plainly instead of letting the operator
+        # decode "Parse error at offset 0: Invalid value."
+        *.yaml|*.yml)
+            echo "[entrypoint] ERROR: ${arg} has a YAML extension, but freqtrade" >&2
+            echo "[entrypoint]   parses every config file as JSON (rapidjson) and" >&2
+            echo "[entrypoint]   ignores the file extension. YAML is not supported:" >&2
+            echo "[entrypoint]   '#' comments and 'key: value' syntax are invalid." >&2
+            echo "[entrypoint]   Convert this file to JSON. Comments must be // or" >&2
+            echo "[entrypoint]   /* */, and freqtrade will fail to start until it is." >&2
+            if [ -f "${arg}" ]; then
+                out="/dev/shm/config-$(basename "${arg}")"
+                if sanitise_config "${arg}" "${out}"; then
+                    SANITISED_ARGS+=("${out}")
+                else
+                    SANITISED_ARGS+=("${arg}")
+                fi
+            else
+                SANITISED_ARGS+=("${arg}")
+            fi
+            ;;
+        *.json)
             if [ -f "${arg}" ]; then
                 out="/dev/shm/config-$(basename "${arg}")"
                 if sanitise_config "${arg}" "${out}"; then

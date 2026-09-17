@@ -1,3 +1,13 @@
+# =============================================================================
+# SUPERSEDED - use portainer-stack.yml
+# =============================================================================
+# This standalone compose file predates the Swarm deployment and is not
+# maintained. Besides bypassing the security model (it passes credentials
+# via *_FILE env vars, which freqtrade silently ignores), it references
+# the freqtrade configs as .yaml. Freqtrade parses every config with
+# rapidjson and does not support YAML at all - see portainer-stack.yml.
+# =============================================================================
+
 version: '3.8'
 
 # Standalone Docker Compose for Single-Host Deployment (No Swarm/Portainer Secrets)

@@ -158,8 +158,8 @@ directory.
 
 | Swarm config | Source file | Mounted at |
 |--------------|-------------|------------|
-| `freqtrade_base_config` | `config/base.yaml` | `/freqtrade/user_data/base.yaml` |
-| `freqtrade_canada_config` | `config/canada_kraken.yaml` | `/freqtrade/user_data/canada_kraken.yaml` |
+| `freqtrade_base_config` | `config/base.json` | `/freqtrade/user_data/base.json` |
+| `freqtrade_canada_config` | `config/canada_kraken.json` | `/freqtrade/user_data/canada_kraken.json` |
 | `freqtrade_strategy` | `config/strategies/moderate_multi.py` | `/etc/freqtrade-strategies/moderate_multi.py` |
 | `freqtrade_entrypoint` | `config/freqtrade-entrypoint.sh` | `/etc/freqtrade-entrypoint.sh` |
 | `freqtrade_ai_config` | `config/ai_orchestrator.yaml` | `/app/config/ai_orchestrator.yaml` |
@@ -297,7 +297,7 @@ the API — can silently reconfigure the bot.
 | `ModuleNotFoundError: ai_orchestrator` | The orchestrator image was built with the wrong context. It must be built from the repo root with `file: ai_orchestrator/Dockerfile` |
 | Orchestrator returns `503` on every route | `orchestrator_api_token` is missing. This is intentional fail-closed behaviour — create the secret and redeploy (see "Orchestrator API Authentication") |
 | Orchestrator returns `401` | Missing or wrong `Authorization: Bearer <token>` header |
-| `429` / `EAPI:Rate limit exceeded` from Kraken | Raise `exchange.ccxt_async_config.rateLimit` in `config/canada_kraken.yaml` (default 3500 ms) |
+| `429` / `EAPI:Rate limit exceeded` from Kraken | Raise `exchange.ccxt_async_config.rateLimit` in `config/canada_kraken.json` (default 3500 ms) |
 | AI features stop mid-day | OpenRouter free-tier daily budget (200/day) is spent. The bot keeps trading; AI resumes at 00:00 UTC. Check `/api/v1/explain/digest` for the remaining count |
 | `freqtrade_strategy` config not visible in the strategies dir | Expected — it is staged at `/etc/freqtrade-strategies/` and copied in by the entrypoint, because Swarm configs are read-only |
 | AI Orchestrator 401 errors | `freqtrade_api_password` mismatch between secrets |

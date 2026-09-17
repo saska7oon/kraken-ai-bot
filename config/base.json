@@ -1,0 +1,287 @@
+// =============================================================================
+// Freqtrade Base Configuration
+// =============================================================================
+// This file contains NO secrets. Credentials are injected at container start
+// by /etc/freqtrade-entrypoint.sh, which reads the Docker Swarm secrets and
+// generates an ephemeral private config in tmpfs (/dev/shm).
+//
+// DO NOT add api keys, passwords or webhook URLs to this file.
+//
+// WHY JSON AND NOT YAML:
+// Freqtrade parses every config file with rapidjson - see
+// freqtrade/configuration/load_config.py. There is no YAML support at all, and
+// the file extension is ignored, so a .yaml file is still parsed as JSON and
+// fails immediately. Comments must therefore be // or /* */, never #.
+//
+// The parser runs with comments and trailing commas enabled, so // comments
+// like these are safe and are officially supported.
+// =============================================================================
+{
+    // -------------------------------------------------------------------------
+    // EXCHANGE
+    // -------------------------------------------------------------------------
+    "exchange": {
+        "name": "kraken",
+
+        // Credentials come from the generated private config, never from here.
+        // "key" and "secret" are provided at runtime by the entrypoint.
+
+        "ccxt_config": {
+            "enableRateLimit": true
+        },
+
+        "ccxt_async_config": {
+            "enableRateLimit": true,
+            "rateLimit": 3500
+        },
+
+        "skip_pair_validation": false,
+
+        // StaticPairList reads the whitelist from here. Overridden in
+        // canada_kraken.json with the CAD pairs.
+        "pair_whitelist": [
+            "BTC/CAD"
+        ],
+
+        // Pair blacklist. Entries are regexes, not globs.
+        "pair_blacklist": [
+            ".*/BULL",
+            ".*/BEAR",
+            ".*/HALF",
+            ".*/HEDGE",
+            "PEPE/CAD"
+        ]
+    },
+
+    // -------------------------------------------------------------------------
+    // PAIRLIST HANDLER
+    // -------------------------------------------------------------------------
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
+    ],
+
+    // -------------------------------------------------------------------------
+    // STAKE / TRADING
+    // -------------------------------------------------------------------------
+    "stake_currency": "CAD",
+    "fiat_display_currency": "CAD",
+
+    // ALWAYS start with dry_run: true. Switching this to false places real
+    // orders with real money, and it cannot be done through the AI interface
+    // or the orchestrator API - only by editing this config and redeploying.
+    "dry_run": true,
+    "dry_run_wallet": 1000,
+
+    "max_open_trades": 3,
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 0.90,
+    "amount_reserve_percent": 0.05,
+
+    "amend_last_stake_amount": true,
+    "last_stake_amount_min_ratio": 0.5,
+
+    // -------------------------------------------------------------------------
+    // RISK MANAGEMENT (moderate profile)
+    // -------------------------------------------------------------------------
+    // stoploss is how much a single trade may lose before it is closed
+    // automatically. -0.08 means 8%.
+    "stoploss": -0.08,
+
+    "trailing_stop": true,
+    "trailing_stop_positive": 0.02,
+    "trailing_stop_positive_offset": 0.03,
+    "trailing_only_offset_is_reached": false,
+
+    // Profit targets: take 4% immediately, then relax over time so a trade is
+    // never held open forever waiting for a target that has passed.
+    "minimal_roi": {
+        "0": 0.04,
+        "30": 0.02,
+        "60": 0.01,
+        "120": 0
+    },
+
+    // -------------------------------------------------------------------------
+    // TIMEFRAME
+    // -------------------------------------------------------------------------
+    "timeframe": "5m",
+    "process_only_new_candles": true,
+
+    // -------------------------------------------------------------------------
+    // DATA STORAGE
+    // -------------------------------------------------------------------------
+    "dataformat_ohlcv": "json",
+    "dataformat_trades": "jsongz",
+
+    // -------------------------------------------------------------------------
+    // PROTECTIONS - automatic circuit breakers
+    // -------------------------------------------------------------------------
+    // Freqtrade's built-in safety mechanisms. They are deterministic, tested
+    // upstream, and active in dry-run as well as live.
+    //
+    // The original configuration had NONE of these: if the strategy started
+    // bleeding, nothing would have stopped it. For an operator who is not a
+    // trader, these are the most valuable settings in the file.
+    //
+    // Timings are in candles. The timeframe is 5m, so:
+    //   12 candles = 1 hour, 96 = 8 hours, 288 = 24 hours.
+    "protections": [
+        // Stop trading entirely if the account loses more than 10% in a day.
+        {
+            "method": "MaxDrawdown",
+            "lookback_period_candles": 288,
+            "trade_limit": 10,
+            "stop_duration_candles": 288,
+            "max_allowed_drawdown": 0.10
+        },
+
+        // If 3 trades hit their stop loss within 8 hours, something is wrong
+        // with the market or the strategy. Pause all trading rather than keep
+        // feeding it money.
+        {
+            "method": "StoplossGuard",
+            "lookback_period_candles": 96,
+            "trade_limit": 3,
+            "stop_duration_candles": 96,
+            "only_per_pair": false
+        },
+
+        // After any exit, wait 1 hour before opening a new trade. Prevents
+        // rapid re-entry churn, which mostly generates fees.
+        {
+            "method": "CooldownPeriod",
+            "stop_duration_candles": 12
+        }
+    ],
+
+    // -------------------------------------------------------------------------
+    // EDGE (position-sizing optimiser) - off until there is trade history
+    // -------------------------------------------------------------------------
+    "edge": {
+        "enabled": false,
+        "process_throttle_secs": 3600,
+        "calculate_since_number_of_days": 30,
+        "minimum_trade_history": 10,
+        "capital_available_percentage": 0.5,
+        "stoploss_range_min": -0.15,
+        "stoploss_range_max": -0.03,
+        "stoploss_range_step": 0.01
+    },
+
+    // -------------------------------------------------------------------------
+    // TELEGRAM (disabled)
+    // -------------------------------------------------------------------------
+    "telegram": {
+        "enabled": false
+    },
+
+    // -------------------------------------------------------------------------
+    // DISCORD
+    // webhook_url is injected from the Swarm secret by the entrypoint.
+    // -------------------------------------------------------------------------
+    "discord": {
+        "enabled": true,
+        "entry_fill": true,
+        "exit_fill": true,
+        "entry_cancel": true,
+        "exit_cancel": true,
+        "protection_trigger": true,
+        "protection_trigger_global": true,
+        "status": true,
+        "warning": true,
+        "startup": true
+    },
+
+    // -------------------------------------------------------------------------
+    // API SERVER (REST API used by the AI Orchestrator + serves FreqUI)
+    // username/password/jwt_secret_key/ws_token are injected by the entrypoint.
+    // -------------------------------------------------------------------------
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8080,
+        "verbosity": "info",
+        "enable_openapi": true,
+        "CORS_origins": [
+            "http://localhost:8082",
+            "http://127.0.0.1:8082"
+        ]
+    },
+
+    // -------------------------------------------------------------------------
+    // WEBSERVER (FreqUI)
+    // -------------------------------------------------------------------------
+    "webserver": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8081,
+        "verbosity": "info"
+    },
+
+    // -------------------------------------------------------------------------
+    // DATABASE
+    // -------------------------------------------------------------------------
+    "db_url": "sqlite:////freqtrade/user_data/data/tradesv3.sqlite",
+
+    // -------------------------------------------------------------------------
+    // LOGGING
+    // -------------------------------------------------------------------------
+    "logging": {
+        "logfile": "/freqtrade/user_data/logs/freqtrade.log",
+        "loglevel": "INFO",
+        "logfile_level": "DEBUG",
+        "syslog": false,
+        "logrotate": true,
+        "logrotate_max_bytes": 10485760,
+        "logrotate_backup_count": 10
+    },
+
+    // -------------------------------------------------------------------------
+    // STRATEGY
+    // The strategy file is staged into the strategies volume by the entrypoint
+    // from a read-only Swarm config.
+    // -------------------------------------------------------------------------
+    "strategy": "ModerateMultiPairStrategy",
+
+    // Shared with the AI orchestrator (mounted as /app/strategies) so generated
+    // strategies can be backtested before the operator is asked to approve them.
+    "strategy_path": "/freqtrade/user_data/strategies",
+
+    // -------------------------------------------------------------------------
+    // PLOTTING
+    // -------------------------------------------------------------------------
+    "plot": {
+        "main_plot": {
+            "ema_9": {"color": "blue"},
+            "ema_21": {"color": "orange"},
+            "ema_50": {"color": "green"},
+            "ema_200": {"color": "red"},
+            "bb_lowerband": {"color": "gray"},
+            "bb_middleband": {"color": "gray"},
+            "bb_upperband": {"color": "gray"}
+        },
+        "subplots": {
+            "rsi": {
+                "rsi": {"color": "purple"},
+                "rsi_overbought": {"color": "red"},
+                "rsi_oversold": {"color": "green"}
+            },
+            "macd": {
+                "macd": {"color": "blue"},
+                "macdsignal": {"color": "orange"},
+                "macdhist": {"color": "green"}
+            }
+        }
+    },
+
+    // -------------------------------------------------------------------------
+    // OPERATIONAL
+    // -------------------------------------------------------------------------
+    "cancel_open_orders_on_exit": true,
+
+    "internals": {
+        "process_throttle_secs": 5
+    }
+}
