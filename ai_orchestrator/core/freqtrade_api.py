@@ -365,6 +365,55 @@ class FreqtradeAPIClient:
     async def cancel_open_order(self, trade_id: int) -> Dict[str, Any]:
         return await self._request("DELETE", f"/api/v1/trades/{trade_id}/open-order")
 
+    async def delete_trade(self, trade_id: int) -> Dict[str, Any]:
+        """Delete one trade (DELETE /trades/{id}).
+
+        Freqtrade cancels the trade's open orders and its on-exchange stop loss
+        before deleting the row, then refreshes the wallet. That is why a reset
+        goes through this endpoint rather than removing database rows: deleting
+        rows directly would leave live orders behind on the exchange with
+        nothing tracking them.
+
+        Unlike `force_exit`, this works on open trades too, so it is the only
+        path that can clear a position and its record in one step.
+        """
+        return await self._request("DELETE", f"/api/v1/trades/{trade_id}")
+
+    # ================================================================ locks
+    async def get_locks(self) -> List[Dict[str, Any]]:
+        """Active pair locks (GET /locks).
+
+        These are what the strategy's protections produce - MaxDrawdown,
+        StoplossGuard and CooldownPeriod each lock pairs for a period. They are
+        rows in a `pairlocks` table, so they outlive a restart, and a reset that
+        ignores them leaves the bot locked out by rules that fired before the
+        reset. It then looks broken while actually working as designed.
+        """
+        data = await self._request("GET", "/api/v1/locks")
+        locks = data.get("locks", []) if isinstance(data, dict) else []
+        return [lock for lock in locks if isinstance(lock, dict)]
+
+    async def delete_lock(self, lock_id: int) -> Dict[str, Any]:
+        """Release one pair lock (DELETE /locks/{id})."""
+        return await self._request("DELETE", f"/api/v1/locks/{lock_id}")
+
+    # ============================================================ bot control
+    async def reload_config(self) -> Dict[str, Any]:
+        """Ask Freqtrade to re-read its config files (POST /reload_config).
+
+        Verified against Freqtrade 2026.8: this sets state to RELOAD_CONFIG, the
+        worker loop sees it and calls `_reconfigure()`, which runs
+        `Configuration(self._args, None).get_config()` again - a genuine re-read
+        of the files on disk - and rebuilds the bot around the new config.
+
+        So a settings change takes effect without a container restart, which is
+        what makes an operator-editable config layer possible without granting
+        the orchestrator access to the Docker socket. Mounting that socket would
+        be equivalent to root on the host, and is not a trade worth making for a
+        convenience feature.
+        """
+        return await self._request("POST", "/api/v1/reload_config")
+
     # ================================================================ markets
     async def get_markets(self) -> Dict[str, Any]:
         """All markets known to the exchange (GET /markets -> {"markets": {...}})."""

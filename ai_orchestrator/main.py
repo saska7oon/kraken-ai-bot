@@ -45,6 +45,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from ai_orchestrator.core.audit_logger import AuditLogger
+from ai_orchestrator.core import dryrun_reset, settings_store
 from ai_orchestrator.core.freqtrade_api import (
     FreqtradeAPIClient,
     FreqtradeAPIError,
@@ -393,6 +394,39 @@ class WhitelistRequest(BaseModel):
     pairs: list[str]
 
 
+class SettingsRequest(BaseModel):
+    """A change the operator is making deliberately.
+
+    `confirmation` is required only to turn off dry run. It is a separate field
+    rather than a flag inside `settings` so that it cannot be written into the
+    settings file by mistake - `settings` is validated against an allowlist and
+    persisted, and the confirmation must never be persisted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    settings: Dict[str, Any]
+    confirmation: Optional[str] = Field(
+        default=None,
+        description='Required to disable dry run. Must be exactly "TRADE REAL MONEY".',
+    )
+
+
+class PresetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preset: str
+
+
+class ResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation: str = Field(
+        ...,
+        description='Must be exactly "RESET DRY RUN".',
+    )
+
+
 # ============================================================
 # ROUTES
 # ============================================================
@@ -538,6 +572,302 @@ async def safety_posture(_: str = Depends(require_api_token)):
             "unknown. This is NOT a confirmation that none are configured."
         )
     return posture
+
+
+# =============================================================================
+# Operator settings
+# =============================================================================
+# These routes are how the operator changes configuration without hand-editing
+# JSON in Portainer. They are deliberately separate from everything the AI can
+# reach:
+#
+#   * No plugin, no chat command and no proposal can call them. `nl_config` keeps
+#     its own frozen-key list, and nothing in the command path imports this
+#     module. A test asserts the AI-reachable surface cannot write settings.
+#   * Credentials are never accepted here. The allowlist in settings_store has no
+#     key for an API key, a secret, or the exchange block - so "change the API
+#     key from the UI" is not a guarded operation, it is an absent one.
+#   * `db_url` is derived from `dry_run` rather than accepted, which makes the
+#     mismatched-pair bug unrepresentable instead of merely validated.
+#
+# Every change is audited, and applied with a config reload rather than a
+# restart, so a change is one action rather than a trip to Portainer.
+
+
+async def _audit_settings(
+    actor: str, changes: Dict[str, Any], reasoning: str
+) -> Optional[str]:
+    """Record a settings change, and say so if it could not be recorded.
+
+    Deliberately non-blocking, unlike the read-only audit routes which return
+    503. Blocking would mean an operator cannot move *back* to dry run because
+    the audit log is unavailable, and that is the wrong direction to fail in: the
+    safe change should always be reachable.
+
+    It is not silent either. An unrecorded configuration change is a real gap in
+    a tamper-evident trail, so the response says so rather than letting the
+    operator assume it was logged.
+    """
+    if audit_logger is None:
+        logger.error("Settings change by %s was NOT audited (logger unavailable)", actor)
+        return (
+            "This change was not written to the audit log because the audit "
+            "logger is unavailable. The change itself did apply."
+        )
+
+    try:
+        await audit_logger.log_config_change(
+            plugin="operator_settings",
+            config_changes=changes,
+            reasoning=reasoning,
+            user_initiated=True,
+            approved_by=actor,
+        )
+    except Exception as e:  # noqa: BLE001 - an audit failure must not undo a change
+        logger.error("Failed to audit settings change by %s: %s", actor, e)
+        return "This change could not be written to the audit log: %s" % e
+
+    return None
+
+
+async def _apply_and_reload(actor: str, changes: Dict[str, Any]) -> Dict[str, Any]:
+    """Write settings, then ask Freqtrade to pick them up.
+
+    A failed reload is reported as `applied: false` rather than raised. The
+    settings are on disk either way, so the operator needs to know the file
+    changed but the running bot has not caught up - telling them it failed
+    outright would invite them to change it again.
+    """
+    result: Dict[str, Any] = {
+        "settings": changes,
+        "applied": False,
+        "reload_error": None,
+    }
+
+    if freqtrade_client is None:
+        result["reload_error"] = "The Freqtrade API client is not available."
+        return result
+
+    try:
+        await freqtrade_client.reload_config()
+        result["applied"] = True
+    except FreqtradeAPIError as e:
+        result["reload_error"] = (
+            "Saved, but the bot has not applied it yet: %s. It will take effect "
+            "the next time the bot restarts." % e
+        )
+
+    return result
+
+
+@app.get("/api/v1/settings")
+async def get_settings(_: str = Depends(require_api_token)):
+    """Everything needed to render the settings panel, plus what is in force."""
+    payload = settings_store.describe()
+
+    # The running bot's view, which is what actually matters. If this disagrees
+    # with the settings file, the file was written but not applied - worth
+    # showing rather than hiding.
+    if freqtrade_client:
+        try:
+            cfg = await freqtrade_client.get_config()
+            payload["effective"] = {
+                "dry_run": cfg.get("dry_run"),
+                "max_open_trades": cfg.get("max_open_trades"),
+                "stoploss": cfg.get("stoploss"),
+                "tradable_balance_ratio": cfg.get("tradable_balance_ratio"),
+                "dry_run_wallet": cfg.get("dry_run_wallet"),
+                "db_url": cfg.get("db_url"),
+            }
+        except FreqtradeAPIError as e:
+            payload["effective"] = None
+            payload["effective_error"] = str(e)
+    else:
+        payload["effective"] = None
+        payload["effective_error"] = "The Freqtrade API client is not available."
+
+    return payload
+
+
+@app.post("/api/v1/settings")
+async def update_settings(
+    request: SettingsRequest, user: str = Depends(require_api_token)
+):
+    """Validate, write, audit and apply a settings change."""
+    actor = resolve_operator_name(user)
+
+    try:
+        changes = settings_store.validate(
+            request.settings, confirmation=request.confirmation
+        )
+    except settings_store.SettingsError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+    try:
+        settings_store.write(changes, actor=actor)
+    except OSError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Could not save the settings: %s. The settings volume may not be "
+                "writable." % e
+            ),
+        )
+
+    audit_note = await _audit_settings(
+        actor, changes, "Operator changed settings through the UI."
+    )
+
+    result = await _apply_and_reload(actor, changes)
+    result["summary"] = _settings_summary(changes, result)
+    result["audit_note"] = audit_note
+    return result
+
+
+def _settings_summary(changes: Dict[str, Any], result: Dict[str, Any]) -> str:
+    """One plain sentence about what just happened."""
+    parts = []
+
+    if changes.get("dry_run") is False:
+        parts.append(
+            "LIVE TRADING IS NOW ON. The bot can place real orders with real "
+            "money from now on."
+        )
+    elif changes.get("dry_run") is True:
+        parts.append("Back in simulation. No real orders will be placed.")
+
+    described = [
+        "%s is now %s" % (settings_store.EDITABLE_BY_KEY[k].label, v)
+        for k, v in sorted(changes.items())
+        if k in settings_store.EDITABLE_BY_KEY
+    ]
+    if described:
+        parts.append("Changed: " + "; ".join(described) + ".")
+
+    if result.get("applied"):
+        parts.append("The bot has picked the change up.")
+    else:
+        parts.append(result.get("reload_error") or "The bot has not picked it up yet.")
+
+    return " ".join(parts)
+
+
+@app.post("/api/v1/settings/preset")
+async def apply_risk_preset(
+    request: PresetRequest, user: str = Depends(require_api_token)
+):
+    """Apply a named risk level in one action.
+
+    Three numbers with no explanation is the wrong interface for someone who does
+    not trade. A named level with a sentence about what it means is one they can
+    actually choose from.
+    """
+    actor = resolve_operator_name(user)
+
+    try:
+        values = settings_store.apply_preset(request.preset)
+        changes = settings_store.validate(values)
+    except settings_store.SettingsError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
+    try:
+        settings_store.write(changes, actor=actor)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail="Could not save: %s" % e)
+
+    audit_note = await _audit_settings(
+        actor, changes, "Operator applied the %r risk level." % request.preset
+    )
+
+    result = await _apply_and_reload(actor, changes)
+    result["audit_note"] = audit_note
+    preset = settings_store.RISK_PRESETS[request.preset]
+    result["summary"] = "%s applied. %s %s" % (
+        preset["label"],
+        preset["blurb"],
+        "The bot has picked it up." if result.get("applied") else result.get("reload_error", ""),
+    )
+    return result
+
+
+@app.post("/api/v1/settings/undo")
+async def undo_settings(user: str = Depends(require_api_token)):
+    """Put the previous settings back."""
+    actor = resolve_operator_name(user)
+
+    try:
+        snapshot = settings_store.restore_backup(actor=actor)
+    except settings_store.SettingsError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail="Could not restore: %s" % e)
+
+    audit_note = await _audit_settings(
+        actor, snapshot.settings, "Operator undid the previous settings change."
+    )
+
+    result = await _apply_and_reload(actor, snapshot.settings)
+    result["audit_note"] = audit_note
+    result["settings"] = snapshot.settings
+    result["summary"] = "Previous settings restored. " + (
+        "The bot has picked it up."
+        if result.get("applied")
+        else (result.get("reload_error") or "")
+    )
+    return result
+
+
+# ----------------------------------------------------------------- dry-run reset
+@app.get("/api/v1/settings/reset-dryrun")
+async def preview_dryrun_reset(_: str = Depends(require_api_token)):
+    """What a reset would remove. Reads only - nothing is changed."""
+    if freqtrade_client is None:
+        raise HTTPException(
+            status_code=503, detail="The Freqtrade API client is not available."
+        )
+    return (await dryrun_reset.preview(freqtrade_client)).as_dict()
+
+
+@app.post("/api/v1/settings/reset-dryrun")
+async def reset_dryrun(
+    request: ResetRequest, user: str = Depends(require_api_token)
+):
+    """Clear every simulated trade and release every pair lock.
+
+    Refuses outright when the bot is live. That check reads the trading mode from
+    the running bot rather than from a file, so a settings change that has been
+    written but not yet applied cannot make this think it is in simulation while
+    real orders are being placed.
+    """
+    if freqtrade_client is None:
+        raise HTTPException(
+            status_code=503, detail="The Freqtrade API client is not available."
+        )
+
+    actor = resolve_operator_name(user)
+
+    try:
+        report = await dryrun_reset.reset(
+            freqtrade_client, confirmation=request.confirmation, actor=actor
+        )
+    except dryrun_reset.ResetRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except FreqtradeAPIError as e:
+        raise HTTPException(status_code=502, detail="Could not reach the bot: %s" % e)
+
+    report["audit_note"] = await _audit_settings(
+        actor,
+        {
+            "action": "reset_dry_run",
+            "trades_deleted": report["trades_deleted"],
+            "trades_failed": report["trades_failed"],
+            "locks_released": report["locks_released"],
+            "backup_path": report["backup_path"],
+        },
+        "Operator cleared the simulated trade history to start over.",
+    )
+
+    return report
 
 
 def get_nl_plugin():

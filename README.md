@@ -525,6 +525,100 @@ consider live money once you understand *why* it makes the trades it makes.
 
 ---
 
+## ⚙️ Changing settings from the UI
+
+You do not have to edit JSON in Portainer to change how the bot trades. The
+**Settings** panel covers everything you are allowed to change:
+
+| What | Why it is safe to expose |
+|------|--------------------------|
+| **Trading mode** (simulation / real money) | Behind a typed phrase, not a click |
+| **Risk level** — Conservative / Moderate / Aggressive | One choice instead of three numbers |
+| **Maximum open trades**, **stop loss**, **balance used**, **simulation wallet** | Each has a safe range, enforced server-side |
+| **Undo last change** | Keeps the previous version of the file |
+
+### Why this does not weaken anything
+
+The safety model was never "the operator cannot change configuration" — it is
+**the AI cannot change configuration behind your back**. Those are different
+claims, and this panel only touches the second one:
+
+- **No plugin, chat command or proposal can reach these routes.** The AI proposes;
+  you decide. A test asserts the AI-facing surface cannot write settings at all.
+- **Credentials are never accepted here.** There is no key for an API key, a
+  secret, or the exchange block — so "change the API key from the UI" is not a
+  guarded operation, it is an absent one. Secrets stay in Docker Swarm secrets.
+- **Values are bounded, not clamped.** A stop loss looser than -15% is refused
+  outright rather than quietly adjusted, so nothing changes without you seeing it.
+- **Going live needs a typed phrase.** `TRADE REAL MONEY`, exactly. A checkbox
+  gets clicked by accident; this does not.
+
+### How a change takes effect
+
+The settings live in a writable volume that Freqtrade reads as its **last**
+`--config`, so it overrides the read-only Swarm configs. Saving then calls
+Freqtrade's `reload_config`, which re-reads the config files from disk and
+rebuilds the bot — **no restart, and no Docker socket mounted anywhere**.
+Mounting that socket would be equivalent to root on the host, which is not a
+trade worth making for a convenience feature.
+
+If the reload fails, the panel says so: the file changed but the running bot has
+not caught up. It will apply on the next restart.
+
+### `db_url` is derived, never set
+
+You will not find a database setting in the panel, and you cannot set one
+directly. Freqtrade's database follows the trading mode automatically:
+
+```
+dry_run: true   ->  tradesv3.dryrun.sqlite
+dry_run: false  ->  tradesv3.sqlite
+```
+
+That is deliberate. The mismatched pair — simulated trades recorded in the live
+database — was a real bug in this project, and it was silent. Deriving the value
+makes it **unrepresentable** rather than merely validated. Ask the API to set
+`db_url` and it explains why it will not.
+
+---
+
+## 🔄 Starting the dry run over
+
+A dry run is only informative if you can compare like with like. Change the
+strategy or the risk level and your history becomes an average of the old rules
+and the new ones. **Start the dry run over** clears it so a change can be measured
+on its own.
+
+**What it does, in order:**
+
+1. **Copies the trades to a file first.** "Start over" should mean a clean slate,
+   not amnesia — the previous run stays readable in the settings volume.
+2. **Releases the trading locks.** This is the part that is easy to miss. The
+   protections (MaxDrawdown, StoplossGuard, Cooldown) write locks into a
+   `pairlocks` table that **survives a restart**. Reset the trades but leave the
+   locks, and the bot refuses to trade because of a drawdown that happened in a
+   simulation that no longer exists — it would look broken while behaving exactly
+   as designed.
+3. **Deletes every simulated trade**, through Freqtrade's own API so each trade's
+   open orders and on-exchange stop loss are cancelled first.
+4. **Tells you if it was partial.** If some trades could not be deleted, it says
+   the history is not clean rather than reporting success.
+
+### It refuses to run when you are live
+
+The trading mode is read from **the running bot**, not from a file — so a settings
+change that has been written but not yet applied cannot make this think it is in
+simulation while real orders are being placed. If the mode cannot be established
+at all, it refuses. Deleting real trade history is not a mistake that can be
+undone, so it is not a possibility that is offered.
+
+### It will not delete the database file
+
+Freqtrade holds that file open, and the orchestrator cannot reach it anyway. Going
+through the API is what guarantees the orders are cancelled rather than orphaned.
+
+---
+
 ## 💰 Switching from dry run to real money
 
 The bot ships in **dry run**: it simulates every trade against real Kraken prices

@@ -75,6 +75,21 @@ services:
       - /etc/freqtrade/canada_kraken.json
       - --config
       - /dev/shm/freqtrade-private.json
+      # LAST, so it wins. This is the file the operator's settings are written
+      # to. Freqtrade merges configs in the order given, with later files taking
+      # precedence, so anything in here overrides both Swarm configs.
+      #
+      # It is safe for this to be last even though the private config above is
+      # generated for fail-safe reasons (disabling Discord when its secret is
+      # missing): the orchestrator's settings allowlist has no key for discord,
+      # the api_server block, the exchange block or any credential, so this file
+      # can only ever contain the handful of trading settings the operator is
+      # allowed to change. A test asserts that allowlist.
+      #
+      # If the file does not exist, freqtrade refuses to start. The entrypoint
+      # creates it before freqtrade runs.
+      - --config
+      - /freqtrade/user_data/runtime/runtime_settings.json
       - --strategy
       - ModerateMultiPairStrategy
       - --strategy-path
@@ -99,6 +114,12 @@ services:
       # Shared with the AI orchestrator so a generated strategy can actually be
       # backtested before the operator is asked to approve it.
       - strategies_shared:/freqtrade/user_data/strategies
+      # The operator-editable settings layer. Swarm configs are immutable and
+      # read-only, so anything the operator changes from the UI has to live in a
+      # volume instead. Mounted at the same path in both containers, and read by
+      # freqtrade as its LAST --config (see the command below), which is what
+      # lets a UI change override the read-only configs.
+      - settings_shared:/freqtrade/user_data/runtime
 
     environment:
       - TZ=America/Toronto
@@ -155,6 +176,11 @@ services:
       # Same volume freqtrade reads strategies from: this is what makes the
       # backtest gate possible.
       - strategies_shared:/app/strategies
+      # The one place the orchestrator can write configuration. It holds only
+      # operator-chosen settings and the trade-list backups taken before a
+      # dry-run reset - never a credential, which lives in Swarm secrets and is
+      # not reachable from any route.
+      - settings_shared:/app/settings
 
     environment:
       - TZ=America/Toronto
@@ -298,6 +324,10 @@ volumes:
   # is consistent.
   strategies_shared:
     name: kraken-strategies-shared
+  # Operator-editable settings, and the trade-list backups written before a
+  # dry-run reset. Both containers run as uid 1000, so ownership is consistent.
+  settings_shared:
+    name: kraken-settings-shared
 
 # =============================================================================
 # CONFIGS - create these in Portainer: Configs -> Add config

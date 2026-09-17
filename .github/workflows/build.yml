@@ -70,6 +70,15 @@ jobs:
       - name: Operator UI (injection safety, endpoints, fields)
         run: python3 ai_orchestrator/tests/test_ui.py
 
+      # The settings store and the dry-run reset are the first code here where
+      # the operator's own actions change how the bot trades, so they get their
+      # own suite: the allowlist, the derived db_url pairing, the typed
+      # confirmation for going live, the refusal to reset a live bot, lock
+      # clearing, failing closed when the bot cannot be reached, and the
+      # assertion that the AI-facing surface cannot write settings at all.
+      - name: Operator settings and dry-run reset
+        run: python3 ai_orchestrator/tests/test_settings.py
+
       - name: Configuration preflight
         run: python3 tools/preflight_config.py
 

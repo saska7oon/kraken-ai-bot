@@ -245,6 +245,60 @@ header{
 .kv .vv{font-family:var(--mono);text-align:right;word-break:break-word}
 
 .empty{color:var(--text-3);font-size:13.2px;padding:12px 0;text-align:center}
+/* ---------- settings ---------- */
+.seg{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 2px}
+.seg button{
+  flex:1;min-width:120px;text-align:left;padding:11px 13px;border-radius:11px;
+  background:rgba(255,255,255,.03);border:1px solid var(--line);color:var(--text-1);
+  cursor:pointer;transition:border-color .15s,background .15s;font:inherit;
+}
+.seg button:hover{background:rgba(255,255,255,.06);border-color:var(--line-hi)}
+.seg button .t{display:block;font-size:13.4px;font-weight:620;margin-bottom:3px}
+.seg button .b{display:block;font-size:11.6px;color:var(--text-3);line-height:1.45}
+.seg button[aria-pressed="true"]{
+  border-color:rgba(96,165,250,.5);background:rgba(96,165,250,.1);
+}
+.seg button[aria-pressed="true"] .t{color:var(--accent)}
+.set-row{padding:11px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.set-row:last-child{border-bottom:none}
+.set-top{display:flex;align-items:center;gap:12px}
+.set-label{font-size:13.4px;font-weight:600;flex:1}
+.set-input{
+  width:112px;padding:7px 10px;border-radius:9px;font-family:var(--mono);font-size:13px;
+  background:rgba(0,0,0,.3);border:1px solid var(--line);color:var(--text-1);text-align:right;
+}
+.set-input:focus{outline:none;border-color:rgba(96,165,250,.55)}
+.set-help{font-size:11.8px;color:var(--text-3);margin-top:5px;line-height:1.5}
+.mode-box{
+  display:flex;align-items:center;gap:12px;padding:13px;border-radius:12px;
+  border:1px solid var(--line);background:rgba(255,255,255,.02);margin-bottom:12px;
+}
+.mode-box.live{border-color:rgba(251,113,133,.4);background:rgba(251,113,133,.07)}
+.mode-box .mt{font-size:14px;font-weight:640}
+.mode-box .mb{font-size:12px;color:var(--text-2);margin-top:3px;line-height:1.5}
+.mode-box .spacer{flex:1}
+.confirm{
+  margin-top:11px;padding:12px;border-radius:11px;
+  border:1px solid rgba(251,113,133,.35);background:rgba(251,113,133,.07);
+}
+.confirm .ct{font-size:12.6px;color:var(--text-1);line-height:1.55;margin-bottom:9px}
+.confirm code{
+  font-family:var(--mono);font-size:12px;padding:2px 6px;border-radius:5px;
+  background:rgba(0,0,0,.35);border:1px solid var(--line);color:var(--down);
+}
+.confirm .row{display:flex;gap:8px}
+.confirm input{
+  flex:1;padding:8px 11px;border-radius:9px;font-family:var(--mono);font-size:12.6px;
+  background:rgba(0,0,0,.35);border:1px solid var(--line);color:var(--text-1);
+}
+.confirm input:focus{outline:none;border-color:rgba(251,113,133,.55)}
+.danger-zone{margin-top:14px;padding-top:13px;border-top:1px solid rgba(255,255,255,.06)}
+.danger-zone .dz-t{font-size:12px;text-transform:uppercase;letter-spacing:.09em;
+  color:var(--text-3);font-weight:640;margin-bottom:9px}
+.reset-list{margin:9px 0 0;padding-left:0;list-style:none}
+.reset-list li{font-size:12.2px;color:var(--text-2);padding:4px 0;line-height:1.5}
+.reset-list li b{color:var(--text-1);font-family:var(--mono);font-weight:600}
+
 .skel{height:15px;border-radius:6px;background:linear-gradient(90deg,rgba(255,255,255,.05),rgba(255,255,255,.1),rgba(255,255,255,.05));background-size:200% 100%;animation:shim 1.4s infinite;margin-bottom:8px}
 @keyframes shim{0%{background-position:200% 0}100%{background-position:-200% 0}}
 .toast{
@@ -351,6 +405,18 @@ a.link:hover{text-decoration:underline}
           <button class="btn btn-sm" id="gen-btn">Generate a strategy</button>
           <button class="btn btn-sm" id="analysis-btn">Market check</button>
         </div>
+      </div>
+
+      <div class="card" id="settings-card">
+        <h2>Settings<span class="spacer"></span>
+          <button class="btn btn-sm" id="settings-undo" style="display:none">Undo last change</button>
+        </h2>
+        <div id="settings"><div class="skel"></div><div class="skel" style="width:72%"></div></div>
+      </div>
+
+      <div class="card" id="reset-card">
+        <h2>Start the dry run over</h2>
+        <div id="reset"><div class="skel"></div><div class="skel" style="width:64%"></div></div>
       </div>
 
       <div class="card">
@@ -859,11 +925,268 @@ function signOut(message) {
   $("tok").focus();
 }
 
+/* ---------- settings ---------- */
+/* Everything the operator is allowed to change, in one place. The backend owns
+   the allowlist and the bounds; this panel only renders what it is handed, so
+   the UI can never offer a setting the API would refuse. */
+let SETTINGS = null;
+
+async function loadSettings() {
+  const box = $("settings");
+  let d;
+  try { d = await api("/api/v1/settings"); }
+  catch (e) { if (e.auth) return signOut(e.message); throw e; }
+  SETTINGS = d;
+
+  clear(box);
+
+  /* -- trading mode, with the live switch behind a typed phrase -- */
+  const eff = d.effective || {};
+  const live = eff.dry_run === false;
+  const mode = el("div", "mode-box" + (live ? " live" : ""));
+  const modeText = el("div", null);
+  modeText.appendChild(el("div", "mt", live ? "Live money" : "Dry run (simulation)"));
+  modeText.appendChild(el("div", "mb", live
+    ? "Real orders are being placed with your real balance."
+    : "Trades are simulated against real prices. No real money moves."));
+  mode.appendChild(modeText);
+  mode.appendChild(el("div", "spacer"));
+
+  if (!live) {
+    const goLive = el("button", "btn btn-sm btn-danger", "Switch to real money");
+    goLive.onclick = () => askLiveConfirm(mode);
+    mode.appendChild(goLive);
+  } else {
+    const back = el("button", "btn btn-sm", "Back to simulation");
+    back.onclick = () => saveSettings({ dry_run: true }, null, "Back in simulation.");
+    mode.appendChild(back);
+  }
+  box.appendChild(mode);
+
+  /* The confirmation box appears in place rather than as a browser prompt:
+     the phrase has to be read, and a prompt is dismissed by reflex. */
+  const confirmBox = el("div", "confirm");
+  confirmBox.style.display = "none";
+  confirmBox.appendChild(el("div", "ct", "This places real orders with real money. Type "));
+  confirmBox.lastChild.appendChild(el("code", null, d.live_confirmation_phrase));
+  confirmBox.lastChild.appendChild(document.createTextNode(" to confirm."));
+  const cRow = el("div", "row");
+  const cIn = el("input", null);
+  cIn.type = "text";
+  cIn.placeholder = d.live_confirmation_phrase;
+  cIn.autocomplete = "off";
+  cIn.spellcheck = false;
+  const cGo = el("button", "btn btn-sm btn-danger", "Go live");
+  const cNo = el("button", "btn btn-sm", "Cancel");
+  cNo.onclick = () => { confirmBox.style.display = "none"; cIn.value = ""; };
+  cGo.onclick = () => saveSettings({ dry_run: false }, cIn.value, "Live trading is on.");
+  cRow.appendChild(cIn); cRow.appendChild(cGo); cRow.appendChild(cNo);
+  confirmBox.appendChild(cRow);
+  mode.appendChild(confirmBox);
+  mode.askLiveConfirm = () => { confirmBox.style.display = "block"; cIn.focus(); };
+
+  /* -- risk level -- */
+  const presetNames = Object.keys(d.presets || {});
+  if (presetNames.length) {
+    box.appendChild(el("div", "set-label", "Risk level"));
+    const seg = el("div", "seg");
+    presetNames.forEach(name => {
+      const p = d.presets[name];
+      const b = el("button");
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(d.active_preset === name));
+      b.appendChild(el("span", "t", p.label));
+      b.appendChild(el("span", "b", p.blurb));
+      b.onclick = () => applyPreset(name);
+      seg.appendChild(b);
+    });
+    box.appendChild(seg);
+    box.appendChild(el("div", "set-help",
+      d.active_preset
+        ? "Currently matching the " + d.presets[d.active_preset].label.toLowerCase() + " level."
+        : "Your current numbers do not match a preset, because they were changed individually."));
+  }
+
+  /* -- individual settings -- */
+  const editable = (d.editable || []).filter(x => x.key !== "dry_run");
+  if (editable.length) {
+    box.appendChild(el("div", "set-label", "Fine tuning"));
+    box.appendChild(el("div", "set-help",
+      "Each one has a safe range. Values outside it are refused rather than clamped, "
+      + "so nothing changes silently."));
+    editable.forEach(x => box.appendChild(settingRow(x)));
+  }
+
+  /* -- disagreement between the file and the running bot -- */
+  if (d.effective_error) {
+    box.appendChild(el("div", "set-help", "Could not read the running bot: " + d.effective_error));
+  }
+  $("settings-undo").style.display = d.has_backup ? "" : "none";
+}
+
+function settingRow(x) {
+  const row = el("div", "set-row");
+  const top = el("div", "set-top");
+  top.appendChild(el("div", "set-label", x.label));
+
+  const current = x.value;
+  if (x.kind === "bool") {
+    const b = el("button", "btn btn-sm", current ? "On" : "Off");
+    b.onclick = () => saveSettings({ [x.key]: !current }, null, x.label + " updated.");
+    top.appendChild(b);
+  } else {
+    const input = el("input", "set-input");
+    input.type = "text";
+    input.value = current === null || current === undefined ? "" : String(current);
+    input.setAttribute("aria-label", x.label);
+    input.onchange = () => {
+      const raw = input.value.trim();
+      if (raw === "") { input.value = String(current); return; }
+      saveSettings({ [x.key]: raw }, null, x.label + " updated.");
+    };
+    top.appendChild(input);
+  }
+  row.appendChild(top);
+  row.appendChild(el("div", "set-help", x.help));
+  row.appendChild(el("div", "set-help", x.explain));
+  if (x.minimum !== null && x.maximum !== null) {
+    row.appendChild(el("div", "set-help",
+      "Allowed range: " + x.minimum + " to " + x.maximum));
+  }
+  return row;
+}
+
+function askLiveConfirm(mode) {
+  if (mode && mode.askLiveConfirm) mode.askLiveConfirm();
+}
+
+async function saveSettings(settings, confirmation, okMsg) {
+  try {
+    const r = await api("/api/v1/settings", {
+      method: "POST",
+      body: { settings: settings, confirmation: confirmation || null },
+    });
+    toast(r.summary || okMsg || "Saved.", r.applied === false ? "bad" : null);
+    if (r.audit_note) toast(r.audit_note, "bad");
+    await refreshAll(false);
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    toast(e.message, "bad");
+  }
+}
+
+async function applyPreset(name) {
+  try {
+    const r = await api("/api/v1/settings/preset", { method: "POST", body: { preset: name } });
+    toast(r.summary || "Applied.", r.applied === false ? "bad" : null);
+    await refreshAll(false);
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    toast(e.message, "bad");
+  }
+}
+
+async function undoLastChange() {
+  try {
+    const r = await api("/api/v1/settings/undo", { method: "POST" });
+    toast(r.summary || "Restored.", r.applied === false ? "bad" : null);
+    await refreshAll(false);
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    toast(e.message, "bad");
+  }
+}
+
+/* ---------- starting the dry run over ---------- */
+async function loadReset() {
+  const box = $("reset");
+  let d;
+  try { d = await api("/api/v1/settings/reset-dryrun"); }
+  catch (e) { if (e.auth) return signOut(e.message); throw e; }
+
+  clear(box);
+
+  if (!d.allowed) {
+    box.appendChild(el("div", "empty", d.reason || "Not available right now."));
+    return;
+  }
+
+  box.appendChild(el("div", "set-help",
+    "Clears the simulated trade history so you can measure a change on its own "
+    + "instead of averaging it with the old rules. Nothing real is touched."));
+
+  const list = el("ul", "reset-list");
+  const li1 = el("li");
+  li1.appendChild(el("b", null, String(d.total_trades)));
+  li1.appendChild(document.createTextNode(
+    " simulated trade" + (d.total_trades === 1 ? "" : "s") + " will be deleted."));
+  list.appendChild(li1);
+
+  const li2 = el("li");
+  li2.appendChild(el("b", null, String(d.open_trade_count)));
+  li2.appendChild(document.createTextNode(
+    " position" + (d.open_trade_count === 1 ? " is" : "s are") + " currently open"
+    + (d.open_trade_count ? " and will be closed." : ".")));
+  list.appendChild(li2);
+
+  const li3 = el("li");
+  li3.appendChild(el("b", null, String(d.lock_count)));
+  li3.appendChild(document.createTextNode(
+    " trading lock" + (d.lock_count === 1 ? "" : "s") + " will be released. "
+    + "Without this the bot could stay locked out by a rule that fired before the reset."));
+  list.appendChild(li3);
+
+  const li4 = el("li");
+  li4.appendChild(document.createTextNode("The trades are copied to a file first, so the previous run can still be read."));
+  list.appendChild(li4);
+  box.appendChild(list);
+
+  if (d.open_trade_count) {
+    box.appendChild(el("div", "set-help",
+      "You have open positions. They will be closed at the current price as part of the reset."));
+  }
+
+  const cBox = el("div", "confirm");
+  cBox.appendChild(el("div", "ct", "Type "));
+  cBox.lastChild.appendChild(el("code", null, d.confirmation_phrase));
+  cBox.lastChild.appendChild(document.createTextNode(" to confirm."));
+  const row = el("div", "row");
+  const input = el("input", null);
+  input.type = "text";
+  input.placeholder = d.confirmation_phrase;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  const go = el("button", "btn btn-sm btn-danger", "Start over");
+  go.onclick = () => doReset(input.value, go);
+  row.appendChild(input); row.appendChild(go);
+  cBox.appendChild(row);
+  box.appendChild(cBox);
+}
+
+async function doReset(confirmation, btn) {
+  btn.disabled = true;
+  btn.textContent = "Clearing\u2026";
+  try {
+    const r = await api("/api/v1/settings/reset-dryrun", {
+      method: "POST", body: { confirmation: confirmation },
+    });
+    toast(r.summary || "Cleared.", r.status === "partial" ? "bad" : null);
+    if (r.audit_note) toast(r.audit_note, "bad");
+    await refreshAll(false);
+  } catch (e) {
+    if (e.auth) return signOut(e.message);
+    toast(e.message, "bad");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Start over";
+  }
+}
+
 async function refreshAll(initial) {
   try {
     await Promise.all([
       loadStatus(), loadDigest(initial), loadSafety(),
-      loadTrades(), loadApprovals(),
+      loadTrades(), loadApprovals(), loadSettings(), loadReset(),
     ]);
   } catch (e) {
     if (e.auth) return signOut(e.message);
@@ -906,6 +1229,7 @@ $("connect-btn").onclick = () => {
 };
 $("tok").addEventListener("keydown", e => { if (e.key === "Enter") $("connect-btn").click(); });
 $("forget-btn").onclick = () => signOut("Signed out.");
+$("settings-undo").onclick = () => undoLastChange();
 $("refresh-btn").onclick = () => { refreshAll(false); toast("Refreshed."); };
 $("digest-btn").onclick = () => loadDigest(true);
 $("send-btn").onclick = () => send($("chat-in").value);

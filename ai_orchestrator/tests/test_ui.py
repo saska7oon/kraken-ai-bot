@@ -105,18 +105,116 @@ def _keys_returned_by(path: str) -> Set[str]:
     if handler is None:
         return set()
 
-    keys: Set[str] = set()
+    def keys_in(node) -> Set[str]:
+        found: Set[str] = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Dict):
+                for k in sub.keys:
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                        found.add(k.value)
+            # response["key"] = ...
+            elif isinstance(sub, ast.Assign) and isinstance(sub.targets[0], ast.Subscript):
+                sl = sub.targets[0].slice
+                if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
+                    found.add(sl.value)
+        return found
+
+    keys = keys_in(handler)
+
+    # Handlers that delegate their payload to a helper would otherwise appear to
+    # return almost nothing, and the UI's reads would be reported as missing
+    # fields that do exist. Several settings routes build their response in
+    # `_apply_and_reload`, so this is not a hypothetical gap.
+    #
+    # Two hops are followed:
+    #   1. local helpers in main.py that the handler calls
+    #   2. functions in core modules whose result the handler returns directly
+    #      (the dry-run reset returns the report built in dryrun_reset.reset)
+    helpers = {
+        n.name: n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not _is_route(n)
+    }
+
+    called = {
+        n.func.id
+        for n in ast.walk(handler)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    for name in called:
+        helper = helpers.get(name)
+        if helper is not None:
+            keys |= keys_in(helper)
+
+    # Cross-module: a handler that returns another module's result contributes
+    # that function's returned keys. Both shapes occur:
+    #
+    #     return await dryrun_reset.reset(...)      direct
+    #     report = await dryrun_reset.reset(...)    assigned, then returned
+    #     return report
+    #
+    # The second is the one actually used, so following only the direct form
+    # would report the UI's reads as missing fields that do exist.
+    returned_names = {
+        sub.value.id
+        for sub in ast.walk(handler)
+        if isinstance(sub, ast.Return)
+        and sub.value is not None
+        and isinstance(sub.value, ast.Name)
+    }
+
+    candidates: List[ast.Call] = []
     for sub in ast.walk(handler):
-        if isinstance(sub, ast.Dict):
-            for k in sub.keys:
-                if isinstance(k, ast.Constant) and isinstance(k.value, str):
-                    keys.add(k.value)
-        # response["key"] = ...
-        elif isinstance(sub, ast.Assign) and isinstance(sub.targets[0], ast.Subscript):
-            sl = sub.targets[0].slice
-            if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
-                keys.add(sl.value)
+        if isinstance(sub, ast.Return) and sub.value is not None:
+            candidates.extend(c for c in ast.walk(sub.value) if isinstance(c, ast.Call))
+        # x = await module.func(...)  where x is later returned
+        elif isinstance(sub, ast.Assign) and len(sub.targets) == 1:
+            target = sub.targets[0]
+            if (
+                isinstance(target, ast.Name)
+                and target.id in returned_names
+                and isinstance(sub.value, ast.Await)
+            ):
+                candidates.extend(c for c in ast.walk(sub.value) if isinstance(c, ast.Call))
+
+    for call in candidates:
+        if not isinstance(call.func, ast.Attribute):
+            continue
+        module = getattr(call.func.value, "id", None)
+        if not module:
+            continue
+        source = _CORE_MODULES.get(module)
+        if not source or not source.exists():
+            continue
+        try:
+            module_tree = ast.parse(source.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(module_tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == call.func.attr
+            ):
+                keys |= keys_in(node)
+
     return keys
+
+
+def _is_route(node) -> bool:
+    """True if the function is an HTTP route rather than a helper."""
+    for dec in node.decorator_list:
+        if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute):
+            if getattr(dec.func.value, "id", None) == "app":
+                return True
+    return False
+
+
+#: Modules a handler may delegate its response to. Mapped from the name used in
+#: main.py to the file holding the implementation.
+_CORE_MODULES = {
+    "dryrun_reset": pathlib.Path(__file__).resolve().parents[1] / "core" / "dryrun_reset.py",
+    "settings_store": pathlib.Path(__file__).resolve().parents[1] / "core" / "settings_store.py",
+}
 
 
 #: DOM properties and JS builtins that share a variable's name but are not
@@ -342,6 +440,12 @@ def main() -> int:
     })
     allowed_writes = {
         "/api/v1/command", "/api/v1/approve", "/api/v1/plugins/{plugin_name}/control",
+        # Operator settings. These are writes by design: the operator changing
+        # configuration deliberately is the point of the settings panel. They are
+        # not reachable from the AI - no plugin, chat command or proposal can
+        # call them, which test_settings.py asserts separately.
+        "/api/v1/settings", "/api/v1/settings/preset", "/api/v1/settings/undo",
+        "/api/v1/settings/reset-dryrun",
     }
     unexpected = [w for w in writes if w not in allowed_writes]
     if unexpected:

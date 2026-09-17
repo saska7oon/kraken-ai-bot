@@ -234,6 +234,47 @@ sudo -n /bin/chown -R "${CURRENT_UID}:${CURRENT_GID}" /freqtrade/user_data 2>/de
     || true
 
 # ---------------------------------------------------------------------------
+# 4b. Ensure the operator settings file exists.
+#
+#     The stack passes /freqtrade/user_data/runtime/runtime_settings.json as the
+#     LAST --config, so it overrides the read-only Swarm configs. Freqtrade
+#     raises OperationalException('File "<path>" not found!') for a missing
+#     --config file, so this file must exist even when the operator has never
+#     opened the settings page.
+#
+#     Seeded as {} rather than with a copy of the effective settings. An empty
+#     object means "nothing overridden", so the Swarm configs stay in charge and
+#     there is exactly one source of truth for every value until the operator
+#     deliberately changes one. Seeding it with real values would create a second
+#     copy that could drift, and a drifted copy of `dry_run` is the specific bug
+#     that put simulated and real trades in one database.
+#
+#     Never overwritten if it already exists - that would discard the operator's
+#     settings on every restart.
+# ---------------------------------------------------------------------------
+SETTINGS_DIR="/freqtrade/user_data/runtime"
+SETTINGS_FILE="${SETTINGS_DIR}/runtime_settings.json"
+
+mkdir -p "${SETTINGS_DIR}" 2>/dev/null || true
+
+if [ ! -f "${SETTINGS_FILE}" ]; then
+    printf '{}\n' > "${SETTINGS_FILE}" 2>/dev/null || true
+    echo "[entrypoint] created empty operator settings at ${SETTINGS_FILE}"
+else
+    echo "[entrypoint] operator settings present at ${SETTINGS_FILE}"
+fi
+
+# A malformed settings file would stop freqtrade from starting at all, and the
+# operator would have no way to fix it from the UI. Validate, and fall back to
+# empty with the bad file kept aside for inspection.
+if [ -f "${SETTINGS_FILE}" ] && ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "${SETTINGS_FILE}" 2>/dev/null; then
+    echo "[entrypoint] WARNING: operator settings file is not valid JSON."
+    echo "[entrypoint] Moving it aside to ${SETTINGS_FILE}.broken and starting with defaults."
+    mv -f "${SETTINGS_FILE}" "${SETTINGS_FILE}.broken" 2>/dev/null || true
+    printf '{}\n' > "${SETTINGS_FILE}" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
 # 5. Stage strategies into the shared strategies volume.
 #
 #    The shared volume 'strategies_shared' is mounted here as
