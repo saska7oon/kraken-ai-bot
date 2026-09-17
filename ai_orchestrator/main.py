@@ -52,7 +52,10 @@ from ai_orchestrator.core.freqtrade_api import (
     UnsupportedOperation,
 )
 from ai_orchestrator.core.openrouter_client import OpenRouterClient
-from ai_orchestrator.core.strategy_inspector import read_strategy_protections
+from ai_orchestrator.core.strategy_inspector import (
+    describe_strategy,
+    read_strategy_protections,
+)
 from ai_orchestrator.core.plugin_manager import PluginManager
 from ai_orchestrator.plugins.nl_config import ProposalError
 
@@ -548,6 +551,7 @@ async def safety_posture(_: str = Depends(require_api_token)):
         "strategy:protections" if posture["protections"] is not None else None
     )
     posture["strategy_name"] = strategy_name
+    posture["strategy"] = describe_strategy(strategy_name)
 
     if plugin_manager:
         info = plugin_manager.get_all_status().get("autonomous_agent")
@@ -1108,7 +1112,12 @@ async def get_bot_status(_: str = Depends(require_api_token)):
         "runmode": status.runmode,
         "version": status.version,
         "exchange": status.exchange,
+        # The raw class name is kept because it is what identifies the strategy in
+        # the logs and in freqtrade's own output, and someone comparing the two
+        # needs them to match. `strategy_label` and `strategy_description` are what
+        # the UI shows, so a non-expert is not asked to read CamelCase.
         "strategy": status.strategy,
+        **describe_strategy(status.strategy),
         "timeframe": status.timeframe,
         "stake_currency": status.stake_currency,
         "dry_run": status.dry_run,

@@ -26,6 +26,16 @@ class ModerateMultiPairStrategy(IStrategy):
     Moderate risk multi-pair strategy for CAD markets on Kraken Canada.
     """
 
+    # One line, in plain language, shown to the operator in the bot's UI.
+    #
+    # Freqtrade ignores this attribute - it iterates a fixed list of the
+    # attributes it cares about and never enumerates the class's own, so adding
+    # one cannot break strategy loading. It exists so that someone who does not
+    # read code is told what their bot does, instead of being shown the class
+    # name. Keep it short, keep it free of jargon, and describe the *behaviour*
+    # rather than the indicators.
+    DESCRIPTION = "Follows upward trends across four CAD pairs, with a stop loss on every trade"
+
     # Strategy interface version
     INTERFACE_VERSION = 3
 

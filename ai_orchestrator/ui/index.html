@@ -574,13 +574,27 @@ async function loadStatus() {
     (s.max_open_trades !== undefined ? " / " + s.max_open_trades : "");
   $("s-open-d").textContent = "positions currently held";
 
-  $("s-strategy").textContent = s.strategy || "\u2014";
-  $("s-strategy-d").textContent = (s.timeframe || "") + (s.timeframe ? " candles" : "");
+  // The class name is what freqtrade prints in its own logs, so it stays
+  // reachable as a tooltip for anyone cross-referencing the two. What the card
+  // SHOWS is the readable name and, under it, what the strategy actually does -
+  // the class name on its own tells someone who does not read code nothing.
+  $("s-strategy").textContent = s.friendly_name || s.strategy || "\u2014";
+  $("s-strategy").title = s.strategy || "";
+  const stratBits = [];
+  if (s.description) stratBits.push(s.description);
+  if (s.timeframe) stratBits.push(s.timeframe + " candles");
+  $("s-strategy-d").textContent = stratBits.join(" \u00b7 ");
 
   clear($("details"));
   const rows = [
     ["Exchange", s.exchange], ["Mode", s.runmode], ["Version", s.version],
     ["Stake currency", s.stake_currency],
+    // The readable name here, and the class name in brackets after it, because
+    // this panel is where someone goes to check details against the logs.
+    ["Strategy", s.friendly_name && s.strategy && s.friendly_name !== s.strategy
+      ? s.friendly_name + " (" + s.strategy + ")" : (s.friendly_name || s.strategy)],
+    ["What it does", s.description],
+    ["Candle size", s.timeframe],
   ];
   rows.forEach(([k, v]) => {
     if (v === undefined || v === null || v === "") return;

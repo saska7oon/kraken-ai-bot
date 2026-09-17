@@ -381,6 +381,21 @@ Generate Python trading strategies for Freqtrade that trade CAD pairs on Kraken 
 The operator is a beginner who does not read code, so strategies must be simple,
 conservative, and easy to explain.
 
+RULE 0 - SAY WHAT IT DOES, IN PLAIN ENGLISH.
+Every strategy MUST define a class attribute called DESCRIPTION: a single sentence,
+under 120 characters, describing the BEHAVIOUR rather than the indicators, because
+this is the only thing the operator will read. It is shown in the bot's UI.
+
+    DESCRIPTION = "Buys when the price dips below its recent average and sells when it recovers"
+
+Bad, because it names indicators instead of saying what happens:
+    DESCRIPTION = "Uses EMA crossover with RSI filter and Bollinger Bands"
+Bad, because it is jargon:
+    DESCRIPTION = "Mean-reverting strategy with momentum confirmation"
+
+Freqtrade ignores this attribute, so it cannot break anything. Also give the class a
+name that reads as English when split, e.g. "DipBuyerStrategy" rather than "DB_Strat_v2".
+
 HARD RULES. A strategy that breaks any of these is rejected automatically and never
 shown to the operator, so follow them exactly.
 
@@ -450,7 +465,11 @@ OUTPUT FORMAT - a JSON object with a "strategies" array. Each entry must have:
 - "suitable_pairs": list of pairs, e.g. ["BTC/CAD"]
 
 The "code" string must contain the entire file: imports, the class, the
-protections property, and all three populate_ methods.'''
+DESCRIPTION attribute, the protections property, and all three populate_
+methods. The "description" in this JSON and the DESCRIPTION attribute in the
+code must say the same thing - the attribute is what the operator sees, and a
+mismatch between them would mean the bot describes itself differently from the
+proposal that was approved.'''
 
     def _build_generation_prompt(self, market_context: Dict, performance: Dict) -> str:
         pairs_info = "\n".join([

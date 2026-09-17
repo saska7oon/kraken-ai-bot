@@ -525,6 +525,35 @@ consider live money once you understand *why* it makes the trades it makes.
 
 ---
 
+## 🏷️ What the strategy is called
+
+The bot's strategy is a Python class, so its real name is something like
+`ModerateMultiPairStrategy`. That is an identifier, not a name, and it tells you
+nothing about what your money is doing. The UI shows a readable version instead:
+
+> **Moderate multi-pair**
+> Follows upward trends across four CAD pairs, with a stop loss on every trade · 5m candles
+
+The class name is still there as a tooltip and in the details list, because that
+is what appears in Freqtrade's own logs and you may want to match them up.
+
+**Where the sentence comes from.** The strategy file can carry a `DESCRIPTION`
+attribute — one plain sentence about behaviour, not indicators:
+
+```python
+class ModerateMultiPairStrategy(IStrategy):
+    DESCRIPTION = "Follows upward trends across four CAD pairs, with a stop loss on every trade"
+```
+
+Freqtrade ignores this attribute, so it cannot affect trading. If a strategy does
+not have one, the bot falls back to the first line of the file's description, and
+then to the readable version of the class name. **So there is always something
+readable** — a strategy you download from elsewhere still gets a sensible label.
+
+Strategies the AI generates are asked to include one, and the safety checker
+warns (it does not reject) when the sentence is missing, empty, not a plain
+string, or long enough to overflow the card.
+
 ## ⚙️ Changing settings from the UI
 
 You do not have to edit JSON in Portainer to change how the bot trades. The

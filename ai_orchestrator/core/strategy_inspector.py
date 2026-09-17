@@ -75,6 +75,21 @@ DEFAULT_STRATEGIES_DIR = Path("/app/strategies")
 # from the bot config walk out of the strategies directory.
 STRATEGY_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 
+# Far longer than any real strategy class name, and short enough that the label
+# in the UI card cannot overflow. See _is_valid_strategy_name.
+MAX_STRATEGY_NAME_LENGTH = 100
+
+# Kept uppercase in a friendly name, because "Rsi" and "Macd" read as typos to
+# anyone who knows the indicators, and lowercasing them looks like a bug.
+_ACRONYMS = frozenset(
+    {
+        "rsi", "ema", "sma", "wma", "macd", "atr", "adx", "cci", "mfi", "obv",
+        "vwap", "bb", "bollinger", "stoch", "kdj", "ichimoku", "roi", "sl", "tp",
+        "api", "ai", "ui", "id", "cad", "usd", "eur", "btc", "eth", "sol", "xrp",
+        "ada", "dot", "link", "matic", "doge", "ltc", "bch", "avax", "atom",
+    }
+)
+
 # Protection methods freqtrade supports. Used to sanity-check what we read.
 KNOWN_PROTECTION_METHODS = {
     "StoplossGuard",
@@ -93,9 +108,17 @@ def _is_valid_strategy_name(strategy_name: Any) -> bool:
     strategies directory. Rejecting everything that is not ``[A-Za-z0-9_]+`` is
     the smallest rule that cannot be bypassed by an encoding trick the shell or
     ``pathlib`` might interpret differently.
+
+    A length bound is included for a different reason. No real strategy class
+    name is anywhere near this long, and the name is rendered in a fixed-width
+    card in the UI - an unbounded value would be a label that overflows the
+    layout. The limit is far above any plausible name so it cannot reject a real
+    strategy.
     """
-    return isinstance(strategy_name, str) and bool(
-        STRATEGY_NAME_PATTERN.fullmatch(strategy_name)
+    return (
+        isinstance(strategy_name, str)
+        and len(strategy_name) <= MAX_STRATEGY_NAME_LENGTH
+        and bool(STRATEGY_NAME_PATTERN.fullmatch(strategy_name))
     )
 
 
@@ -243,6 +266,208 @@ def _extract_protections_from_tree(tree: ast.AST, strategy_name: str) -> Optiona
             return None
 
     return None
+
+
+def friendly_strategy_name(strategy_name: str) -> str:
+    """Turn a strategy class name into something a person can read.
+
+    ``ModerateMultiPairStrategy`` is an identifier, not a name. Someone who does
+    not write code should not have to decode CamelCase to find out what their bot
+    is running, and the stat card is the first thing they look at.
+
+    The class name is the input because it is the only thing always available:
+    every strategy has one, including ones downloaded from elsewhere. A written
+    description is preferred when it exists, and
+    :func:`read_strategy_description` supplies that - this is the fallback that
+    guarantees a readable label regardless.
+
+    Never raises, and never returns an empty string for a non-empty input: a
+    strategy with an unusual name should look odd, not blank.
+    """
+    if not isinstance(strategy_name, str) or not strategy_name.strip():
+        return ""
+
+    name = strategy_name.strip()
+
+    # "Strategy" on the end is a suffix, not information. Stripped only when
+    # something is left, so a strategy literally called "Strategy" still shows.
+    if name.endswith("Strategy") and len(name) > len("Strategy"):
+        name = name[: -len("Strategy")]
+
+    # Underscores are separators, not part of a word: "MyBot_v2" is "MyBot" and
+    # "v2", not "MyBot" and "v" and "2".
+    name = name.replace("_", " ")
+
+    # Split CamelCase and acronym runs:
+    #   ModerateMultiPair  -> Moderate, Multi, Pair
+    #   RSIMeanReversion   -> RSI, Mean, Reversion
+    #   MACDTrend          -> MACD, Trend
+    #
+    # Digits stay attached to the word they follow, so "v2" survives as one token
+    # and "MultiPair2" does not become "multi pair 2".
+    parts = re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+\d*|[A-Z]+\d*|\d+", name)
+    if not parts:
+        return name
+
+    # Digits belong to a single-letter word ("v2") but are a separate word after
+    # a real one ("MultiPair2" is "Multi-pair 2", not "Multi-pair2"). Version
+    # suffixes are common enough in strategy names to be worth reading properly.
+    expanded: List[str] = []
+    for part in parts:
+        match = re.fullmatch(r"([A-Za-z]{2,})(\d+)", part)
+        if match:
+            expanded.extend([match.group(1), match.group(2)])
+        else:
+            expanded.append(part)
+    parts = expanded
+
+    words: List[str] = []
+    for index, part in enumerate(parts):
+        lowered = part.lower()
+        if lowered in _ACRONYMS:
+            words.append(part.upper())
+        elif index == 0:
+            words.append(part[:1].upper() + part[1:].lower())
+        else:
+            words.append(lowered)
+
+    label = " ".join(words)
+
+    # Hyphenate a few genuinely compound modifiers. English writes "multi-pair"
+    # and "multi-timeframe", not "multi pair", and the hyphen is what makes the
+    # phrase read as one idea rather than two.
+    #
+    # Case-insensitive, because the prefix can be the first word and therefore
+    # capitalised: "MultiTimeframeTrend" is "Multi-timeframe trend". The
+    # replacement preserves the original casing rather than forcing it.
+    label = re.sub(
+        r"\b(multi|cross|non) ([a-z]+)",
+        lambda m: "%s-%s" % (m.group(1), m.group(2)),
+        label,
+        flags=re.IGNORECASE,
+    )
+
+    return label
+
+
+def _extract_description_from_tree(tree: ast.AST, strategy_name: str) -> Optional[str]:
+    """A ``DESCRIPTION`` class attribute, if the strategy defines one.
+
+    Read with the AST and ``literal_eval`` rather than by importing the strategy:
+    importing would execute arbitrary module-level code from a file that may have
+    been written by the AI, which is exactly what this project refuses to do
+    anywhere else.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name != strategy_name:
+            continue
+        for statement in node.body:
+            targets: List[ast.expr] = []
+            if isinstance(statement, ast.Assign):
+                targets = list(statement.targets)
+                value_node = statement.value
+            elif isinstance(statement, ast.AnnAssign):
+                targets = [statement.target]
+                value_node = statement.value
+            else:
+                continue
+            if value_node is None:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id == "DESCRIPTION":
+                    try:
+                        value = ast.literal_eval(value_node)
+                    except (ValueError, SyntaxError):
+                        return None
+                    return value if isinstance(value, str) else None
+    return None
+
+
+def _module_docstring_summary(tree: ast.AST) -> Optional[str]:
+    """The first meaningful line of the module docstring.
+
+    A generated strategy's docstring opens with a summary line, so this is a
+    decent description when no ``DESCRIPTION`` is set. Only the first line, and
+    only if it looks like prose rather than a filename or an empty string.
+    """
+    docstring = ast.get_docstring(tree)
+    if not docstring:
+        return None
+    for line in docstring.splitlines():
+        candidate = line.strip()
+        if len(candidate) >= 12:
+            return candidate.rstrip(".")
+    return None
+
+
+def read_strategy_description(
+    strategy_name: str,
+    strategies_dir: Optional[str | Path] = None,
+) -> Optional[str]:
+    """A one-line plain description of a strategy, or ``None`` if unknown.
+
+    ``None`` means "could not determine", never "there is none" - the same
+    distinction :func:`read_strategy_protections` makes, and for the same reason:
+    an empty string shown where a description belongs reads as a bug in the bot.
+    """
+    if not _is_valid_strategy_name(strategy_name):
+        return None
+
+    directory = Path(strategies_dir) if strategies_dir else DEFAULT_STRATEGIES_DIR
+    try:
+        path = _find_strategy_file(strategy_name, directory)
+        if path is None:
+            return None
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        return _extract_description_from_tree(tree, strategy_name) or _module_docstring_summary(tree)
+    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+        logger.debug("Could not read a description for %s: %s", strategy_name, exc)
+        return None
+
+
+def describe_strategy(
+    strategy_name: Optional[str],
+    strategies_dir: Optional[str | Path] = None,
+) -> Dict[str, Any]:
+    """Everything the UI needs to present a strategy to a non-expert.
+
+    Returns ``friendly_name`` always (derived from the class name, so it is
+    available even when the file cannot be read), plus ``description`` when the
+    strategy provides one. ``description`` is ``None`` rather than empty when
+    unknown, so the UI can omit the line instead of printing nothing.
+    """
+    # An invalid name is treated as "no strategy", so a junk value from the config
+    # is never echoed back to the operator as though it were a real strategy.
+    if not _is_valid_strategy_name(strategy_name):
+        return {
+            "class_name": None,
+            "friendly_name": None,
+            "description": None,
+            "description_source": None,
+        }
+
+    description = read_strategy_description(strategy_name, strategies_dir)
+    source = None
+    if description:
+        # Distinguish an authored DESCRIPTION from a docstring first line, so the
+        # UI can prefer the former and a reviewer can tell which they are seeing.
+        directory = Path(strategies_dir) if strategies_dir else DEFAULT_STRATEGIES_DIR
+        try:
+            path = _find_strategy_file(strategy_name, directory)
+            tree = ast.parse(path.read_text(encoding="utf-8")) if path else None
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            tree = None
+        if tree is not None and _extract_description_from_tree(tree, strategy_name):
+            source = "strategy:DESCRIPTION"
+        else:
+            source = "strategy:docstring"
+
+    return {
+        "class_name": strategy_name,
+        "friendly_name": friendly_strategy_name(strategy_name),
+        "description": description,
+        "description_source": source,
+    }
 
 
 def read_strategy_protections(

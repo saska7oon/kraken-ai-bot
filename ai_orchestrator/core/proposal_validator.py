@@ -732,6 +732,7 @@ class _Analyzer:
             self._collect_imports()
             self._find_strategy_classes()
             self._check_interface_version()
+            self._check_description()
             self._check_required_methods()
             self._check_timeframe()
             self._check_stoploss()
@@ -1102,6 +1103,78 @@ class _Analyzer:
                 f"the bot misread instructions and place unintended trades.",
                 self._line_of(node if node is not None else positions["INTERFACE_VERSION"]),
             )
+
+    def _check_description(self) -> None:
+        """Nudge for a plain-language DESCRIPTION, but never reject over it.
+
+        This is a warning rather than an error on purpose. A strategy with no
+        DESCRIPTION is perfectly valid and runs fine; the UI falls back to
+        prettifying the class name, so the operator still gets something
+        readable. Rejecting a working strategy over a missing sentence would
+        block the feature for a cosmetic reason.
+
+        It is checked at all because the class name is often all the operator
+        ever sees, and "DB_Strat_v2" tells them nothing about what their money is
+        doing. The message says what to add, so a rejected-then-retried
+        generation converges instead of repeating the same omission.
+        """
+        class_node = self.strategy_class
+        if class_node is None:
+            return
+        for statement in class_node.body:
+                value_node = None
+                if isinstance(statement, ast.Assign):
+                    if any(
+                        isinstance(t, ast.Name) and t.id == "DESCRIPTION"
+                        for t in statement.targets
+                    ):
+                        value_node = statement.value
+                elif isinstance(statement, ast.AnnAssign):
+                    if (
+                        isinstance(statement.target, ast.Name)
+                        and statement.target.id == "DESCRIPTION"
+                    ):
+                        value_node = statement.value
+                if value_node is None:
+                    continue
+
+                try:
+                    text = ast.literal_eval(value_node)
+                except (ValueError, SyntaxError):
+                    self.warn(
+                        "description_not_literal",
+                        "DESCRIPTION must be a plain string so the bot can read it "
+                        "without running the code.",
+                        getattr(statement, "lineno", None),
+                    )
+                    return
+
+                if not isinstance(text, str) or not text.strip():
+                    self.warn(
+                        "description_empty",
+                        "DESCRIPTION is empty. Say in one sentence what the strategy "
+                        "does, in plain language.",
+                        getattr(statement, "lineno", None),
+                    )
+                    return
+
+                if len(text) > 200:
+                    self.warn(
+                        "description_too_long",
+                        "DESCRIPTION is %d characters. The operator sees one line, so "
+                        "keep it under about 120." % len(text),
+                        getattr(statement, "lineno", None),
+                    )
+                return
+
+        self.warn(
+            "description_missing",
+            "No DESCRIPTION attribute. Add one sentence in plain language saying what "
+            'the strategy does, for example DESCRIPTION = "Buys when the price dips '
+            'below its recent average". It is what the operator reads, since a class '
+            "name tells them nothing.",
+            getattr(class_node, "lineno", None),
+        )
 
     def _check_required_methods(self) -> None:
         if self.strategy_class is None:
