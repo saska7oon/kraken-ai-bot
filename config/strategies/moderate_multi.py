@@ -26,6 +26,27 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 
 
+def _all_true(conditions: List[DataFrame]) -> DataFrame:
+    """AND a group of boolean Series into a single Series.
+
+    Returns a Series, never a list. That distinction is the whole point: the
+    entry logic below once combined condition *groups* with `|`, which is
+    `list | list` and raised TypeError on every candle for every pair.
+    """
+    signal = conditions[0]
+    for extra in conditions[1:]:
+        signal = signal & extra
+    return signal
+
+
+def _any_true(conditions: List[DataFrame]) -> DataFrame:
+    """OR a group of boolean Series into a single Series."""
+    signal = conditions[0]
+    for extra in conditions[1:]:
+        signal = signal | extra
+    return signal
+
+
 class ModerateMultiPairStrategy(IStrategy):
     """
     Moderate risk multi-pair strategy for CAD markets on Kraken Canada.
@@ -39,7 +60,7 @@ class ModerateMultiPairStrategy(IStrategy):
     # read code is told what their bot does, instead of being shown the class
     # name. Keep it short, keep it free of jargon, and describe the *behaviour*
     # rather than the indicators.
-    DESCRIPTION = "Follows upward trends across four CAD pairs, with a stop loss on every trade"
+    DESCRIPTION = "Looks for upward trends and oversold dips across five CAD pairs, with a stop loss on every trade"
 
     # Strategy interface version
     INTERFACE_VERSION = 3
@@ -336,8 +357,6 @@ class ModerateMultiPairStrategy(IStrategy):
         Generate buy signals based on multiple confluence factors.
         """
 
-        conditions = []
-
         # ---------------------------------------------------------
         # Condition 1: Trend Following (EMA Crossover + RSI)
         # ---------------------------------------------------------
@@ -371,9 +390,6 @@ class ModerateMultiPairStrategy(IStrategy):
             volume_ok = dataframe["volume_ratio"] > self.volume_factor.value
             trend_conditions.append(volume_ok)
 
-        # Combine trend conditions (ALL must be true)
-        if trend_conditions:
-            conditions.append(trend_conditions)
 
         # ---------------------------------------------------------
         # Condition 2: Mean Reversion (Bollinger Bands + RSI)
@@ -401,26 +417,38 @@ class ModerateMultiPairStrategy(IStrategy):
                 mr_conditions.append(volume_spike)
 
         # Combine mean reversion conditions
-        if mr_conditions:
-            conditions.append(mr_conditions)
 
         # ---------------------------------------------------------
-        # Apply all conditions (OR logic between condition groups)
+        # Apply all conditions
+        #
+        # Within a group every condition must hold (AND) - they are
+        # confirmations of one idea. Between groups either is enough (OR) - a
+        # trend entry and a mean-reversion entry are different reasons to buy,
+        # and neither is a prerequisite for the other.
+        #
+        # This block previously read `conditions[0] | conditions[1]`, which
+        # combined two *lists* rather than two Series and raised
+        # "TypeError: unsupported operand type(s) for |: 'list' and 'list'" on
+        # every candle for every pair. The bot ran, fetched candles and could
+        # not evaluate a single entry signal. Groups are reduced explicitly now,
+        # so the operand is unambiguously a Series.
         # ---------------------------------------------------------
-        if conditions:
-            dataframe.loc[
-                (conditions[0]) | (conditions[1] if len(conditions) > 1 else False),
-                "enter_long"
-            ] = 1
+        # freqtrade pre-creates enter_tag but not enter_long, and assigning
+        # through .loc creates the column as NaN everywhere the mask is False.
+        # A NaN signal is not a valid 0/1 and would be read as "no signal" only
+        # by luck, so both columns start defined.
+        dataframe["enter_long"] = 0
 
-        # Tag entries for analysis
-        dataframe.loc[dataframe["enter_long"] == 1, "enter_tag"] = "trend_follow"
-        # Tag mean reversion entries separately
+        if trend_conditions:
+            trend_signal = _all_true(trend_conditions)
+            dataframe.loc[trend_signal, "enter_long"] = 1
+            dataframe.loc[trend_signal, "enter_tag"] = "trend_follow"
+
         if mr_conditions:
-            mr_signal = mr_conditions[0]
-            for cond in mr_conditions[1:]:
-                mr_signal &= cond
-            dataframe.loc[mr_signal & (dataframe["enter_long"] == 0), "enter_long"] = 1
+            mr_signal = _all_true(mr_conditions)
+            dataframe.loc[mr_signal, "enter_long"] = 1
+            # Where both fire, the mean-reversion reason is recorded, matching
+            # the precedence this strategy had before the fix.
             dataframe.loc[mr_signal, "enter_tag"] = "mean_reversion"
 
         return dataframe
@@ -461,11 +489,24 @@ class ModerateMultiPairStrategy(IStrategy):
         # ---------------------------------------------------------
         # Apply exit conditions
         # ---------------------------------------------------------
+        # Exits combine with OR, not AND, and that asymmetry with the entry
+        # logic is deliberate: buying wants confirmations, selling wants to be
+        # easy. Any one warning sign is enough to leave a position.
+        #
+        # This block previously read
+        #   conditions[0] | conditions[1] if len(conditions) > 1 else conditions[0]
+        # which silently ignored conditions[2] and beyond. With the MACD and
+        # Bollinger exits enabled that dropped two of the four configured exit
+        # reasons - and made their sell_macd_enabled / sell_bb_enabled switches
+        # do nothing at all, which is worse than an obviously broken exit
+        # because the operator sees a setting that appears to work.
+        #
+        # As with the entry signal, the column is defined first: assigning
+        # through .loc otherwise leaves NaN wherever the mask is False.
+        dataframe["exit_long"] = 0
+
         if conditions:
-            dataframe.loc[
-                conditions[0] | conditions[1] if len(conditions) > 1 else conditions[0],
-                "exit_long"
-            ] = 1
+            dataframe.loc[_any_true(conditions), "exit_long"] = 1
 
         return dataframe
 

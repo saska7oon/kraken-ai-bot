@@ -51,6 +51,13 @@ jobs:
       - name: Install PyYAML
         run: python3 -m pip install --quiet pyyaml
 
+      # The strategy execution test runs the real strategy file against a real
+      # DataFrame. That needs pandas, and it is the whole point of the test: the
+      # fatal `list | list` bug in populate_entry_trend was a pandas *type*
+      # error that no amount of static checking would have found.
+      - name: Install pandas (for the strategy execution test)
+        run: python3 -m pip install --quiet pandas
+
       # The validator tests are pure stdlib, so they always run.
       #
       # Run plainly from the repo root. This step used to `cd ai_orchestrator/tests`
@@ -98,6 +105,12 @@ jobs:
 
       - name: Pair-list safety rules
         run: python3 ai_orchestrator/tests/test_pair_safety.py
+
+      # Runs the shipped strategy against a real DataFrame. This is the check
+      # that would have caught the entry-signal crash before it reached a live
+      # bot; static validation cannot see a runtime type error.
+      - name: Strategy actually executes and produces signals
+        run: python3 ai_orchestrator/tests/test_strategy_runs.py
 
       # Runs the page's own renderBotControls() against a stub DOM, so the
       # question "does a running bot also offer Start?" is answered by executing

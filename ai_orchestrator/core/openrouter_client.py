@@ -259,7 +259,31 @@ class OpenRouterClient:
                             data = await response.json()
                             self._requests_today += 1
                             self._update_usage(attempt_model, data.get("usage", {}))
-                            return ChatCompletionResponse(**data)
+                            # Build explicitly rather than ChatCompletionResponse(**data).
+                            #
+                            # The provider's payload carries keys this dataclass
+                            # does not model - "object" on every response, plus
+                            # "system_fingerprint" and anything new it adds later -
+                            # and splatting it raised
+                            #   TypeError: ChatCompletionResponse.__init__() got an
+                            #   unexpected keyword argument 'object'
+                            # on EVERY call. The AI narration never once succeeded:
+                            # each request burned its retries, fell through to the
+                            # fallback model, failed there too, and the explainer
+                            # quietly served the deterministic digest instead. The
+                            # failure was invisible in the UI because a digest was
+                            # still produced - it simply was not the AI's.
+                            #
+                            # Naming the fields means an unknown key is ignored
+                            # instead of fatal, which is the right default for a
+                            # third-party API that adds fields without notice.
+                            return ChatCompletionResponse(
+                                id=data.get("id", ""),
+                                model=data.get("model", attempt_model),
+                                choices=data.get("choices") or [],
+                                usage=data.get("usage") or {},
+                                created=data.get("created", 0),
+                            )
                         elif response.status == 429:
                             # Rate limited. Respect Retry-After when present, then
                             # fall back to exponential backoff with jitter so two
