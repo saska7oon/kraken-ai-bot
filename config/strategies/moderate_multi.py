@@ -215,6 +215,18 @@ class ModerateMultiPairStrategy(IStrategy):
     # EMA parameters
     buy_ema_short = IntParameter(5, 15, default=9, space="buy", optimize=True)
     buy_ema_long = IntParameter(18, 30, default=21, space="buy", optimize=True)
+    # How many candles an EMA crossover keeps counting as a fresh trend.
+    #
+    # A crossover is a one-candle event; the trend it announces lasts longer.
+    # Requiring the crossing candle itself is what made this strategy unable to
+    # trade: it needed an EMA cross AND a MACD cross on the same 5-minute
+    # candle, which over 400 candles of real-shaped data happened zero times.
+    # Default 8, not 4. ADX and the directional indicators are computed over a
+    # 14-period window and therefore LAG a trend change: after an EMA crossover
+    # it takes several candles before DI+ actually exceeds DI-. With a window
+    # shorter than that, the entry demanded the crossover and its own
+    # confirmation on the same candle and could not fire at all.
+    buy_trend_window = IntParameter(1, 20, default=8, space="buy", optimize=True)
 
     # Bollinger Bands parameters
     buy_bb_enabled = CategoricalParameter([True, False], default=True, space="buy", optimize=True)
@@ -363,15 +375,33 @@ class ModerateMultiPairStrategy(IStrategy):
         trend_conditions = []
 
         if self.buy_ema_short.value and self.buy_ema_long.value:
-            # EMA crossover (short crosses above long)
-            ema_cross = qtpylib.crossed_above(
-                ta.EMA(dataframe, timeperiod=self.buy_ema_short.value),
-                ta.EMA(dataframe, timeperiod=self.buy_ema_long.value)
+            # EMA crossover (short crosses above long), counted as still live
+            # for buy_trend_window candles afterwards.
+            #
+            # The second half of the condition matters: the short EMA must
+            # still be above the long one. Without it, a crossover followed
+            # immediately by a cross back down would keep registering as a
+            # bullish entry for the rest of the window.
+            ema_short = ta.EMA(dataframe, timeperiod=self.buy_ema_short.value)
+            ema_long = ta.EMA(dataframe, timeperiod=self.buy_ema_long.value)
+            ema_cross = qtpylib.crossed_above(ema_short, ema_long)
+            ema_cross_recent = (
+                ema_cross.rolling(self.buy_trend_window.value, min_periods=1).max().astype(bool)
+                & (ema_short > ema_long)
             )
-            trend_conditions.append(ema_cross)
+            trend_conditions.append(ema_cross_recent)
 
         if self.buy_rsi_enabled.value:
-            # RSI not overbought
+            # RSI still oversold: the trend is turning, not yet extended.
+            #
+            # The comment here used to read "RSI not overbought" while the code
+            # required RSI *below* buy_rsi_value (default 30, range 20-40). The
+            # code and the parameter range agree with each other, so the comment
+            # was the wrong one. Worth stating plainly because it is the single
+            # most restrictive condition left: of 28 candles with a recent EMA
+            # crossover, only 8 also had RSI under 30. That is the intended
+            # trade-off - it buys the turn rather than the run - but it should
+            # be a known choice rather than an accident of a stale comment.
             rsi_ok = dataframe["rsi"] < self.buy_rsi_value.value
             trend_conditions.append(rsi_ok)
 
@@ -381,9 +411,16 @@ class ModerateMultiPairStrategy(IStrategy):
             trend_conditions.append(adx_ok)
 
         if self.buy_macd_enabled.value:
-            # MACD bullish crossover
-            macd_cross = qtpylib.crossed_above(dataframe["macd"], dataframe["macdsignal"])
-            trend_conditions.append(macd_cross)
+            # MACD bullish: momentum is with the trade.
+            #
+            # This was a *second crossover* rather than a state, which turned
+            # "MACD for momentum confirmation" into a second one-candle event
+            # that had to coincide with the first. Two independent crossovers
+            # landing on the same candle is vanishingly rare, so the entry
+            # never fired. Confirmation is a condition that holds, not an
+            # event that happens.
+            macd_bullish = dataframe["macd"] > dataframe["macdsignal"]
+            trend_conditions.append(macd_bullish)
 
         if self.volume_enabled.value:
             # Volume confirmation

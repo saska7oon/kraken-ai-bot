@@ -173,16 +173,20 @@ def _load_strategy():
     return mod.ModerateMultiPairStrategy
 
 
-def _make_dataframe():
-    """Candles that actually trend and pull back, so both branches can fire."""
+def _make_dataframe(seed: int = 20260917, phase: float = 12.0):
+    """Candles that actually trend and pull back, so both branches can fire.
+
+    `seed` and `phase` vary the regime, so a condition can be judged across
+    more than one market shape rather than one lucky series.
+    """
     import numpy as np
     import pandas as pd
 
-    rng = np.random.default_rng(20260917)
+    rng = np.random.default_rng(seed)
     idx = pd.date_range("2026-01-01", periods=ROWS, freq="5min")
     # A slow cycle plus noise: guarantees both crossovers and oversold dips,
     # so neither condition group is vacuously empty.
-    trend = np.sin(np.linspace(0, 12 * np.pi, ROWS)) * 400
+    trend = np.sin(np.linspace(0, phase * np.pi, ROWS)) * 400
     close = pd.Series(60000 + trend + rng.normal(0, 90, ROWS), index=idx)
     high = close + rng.uniform(5, 60, ROWS)
     low = close - rng.uniform(5, 60, ROWS)
@@ -200,9 +204,43 @@ def _make_dataframe():
     df["macd"] = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
     df["macdsignal"] = df["macd"].ewm(span=9, adjust=False).mean()
     df["macdhist"] = df["macd"] - df["macdsignal"]
-    df["adx"] = 28.0
-    df["di_plus"] = 22.0
-    df["di_minus"] = 18.0
+    # ADX and the directional indicators must be *derived from the trend*, not
+    # drawn independently.
+    #
+    # Two earlier versions of this fixture failed here, in opposite directions.
+    # Constants (adx = 28, di_plus = 22) made the ADX condition vacuously true,
+    # so adx_enabled looked like a dead switch. Independent sine waves made it
+    # vary but never coincide with the other conditions, so a five-condition
+    # confluence entry fired zero times - a fixture that models no correlation
+    # cannot produce a confluence, and the strategy looked broken when it was
+    # the data that was.
+    #
+    # In a real market these are not independent: DI+ exceeds DI- while the
+    # short EMA is above the long one, and ADX rises with the distance between
+    # them. Modelling that is what makes "all five agree" a reachable state.
+    # ADX is a LAGGING measure of how strongly price has been moving - it is
+    # high in a strong downtrend as much as in a strong uptrend. Modelling it
+    # as a function of the current EMA spread got this exactly wrong: right
+    # after a crossover the spread is near zero, so ADX was always weakest at
+    # the precise candle the entry looks for, and the trend path could not fire
+    # at any RSI threshold.
+    #
+    # Deriving it from recent absolute movement instead means a cross that
+    # follows a decisive move still sees elevated ADX, which is what a real
+    # chart looks like.
+    moves = df["close"].pct_change().abs()
+    strength = (moves / moves.quantile(0.95)).clip(0, 1)
+    df["adx"] = 12 + 24 * strength.rolling(14, min_periods=1).mean().pow(0.5)
+    # DI+/DI- follow the trend direction but LAG it, because they are computed
+    # over a 14-period window. Making them track the EMA direction exactly -
+    # which is what this fixture did at first - makes "DI+ above DI-" a
+    # restatement of "the short EMA is above the long one", so the condition
+    # becomes redundant and adx_enabled can never change the outcome. A lagging
+    # DI is both more realistic and what keeps that switch meaningful.
+    up_now = (df["ema_9"] > df["ema_21"]).astype(float)
+    up_lagged = up_now.rolling(10, min_periods=1).mean()
+    df["di_plus"] = 14 + 16 * up_lagged
+    df["di_minus"] = 30 - 16 * up_lagged
     # Must exceed volume_factor * 1.5 (1.5 * 1.5 = 2.25) on some candles,
     # or the mean-reversion path is unreachable for fixture reasons.
     df["volume_ratio"] = 1.2 + 1.6 * (np.sin(np.linspace(0, 20 * np.pi, ROWS)) + 1) / 2
@@ -210,7 +248,7 @@ def _make_dataframe():
     return df
 
 
-def _check(name, df, fn, sig_col):
+def _check(name, df, fn, sig_col, fired_paths=None):
     """Call one signal method and check the signal column is well-formed."""
     problems = []
     try:
@@ -231,6 +269,7 @@ def _check(name, df, fn, sig_col):
     if "enter_tag" in out.columns and sig_col == "enter_long":
         tags = out.loc[sig == 1, "enter_tag"].value_counts().to_dict()
         print(f"        entry paths that fired: {tags or 'none'}")
+        fired_paths.update(tags.keys())
     n_nan = int(sig.isna().sum())
     bad = sorted(set(sig.dropna().unique()) - {0, 1})
 
@@ -264,31 +303,95 @@ def _check_switches(strat, df, cls) -> list:
     """
     problems = []
     print()
-    print("  Configured switches actually do something:")
+    print("  Configured switches actually do something (across 4 market shapes):")
     cases = [
         ("sell_bb_enabled", "exit_long", strat.populate_exit_trend),
         ("sell_macd_enabled", "exit_long", strat.populate_exit_trend),
         ("sell_rsi_enabled", "exit_long", strat.populate_exit_trend),
+        # The buy-side toggles matter for the same reason. Note the direction
+        # differs: turning a buy condition OFF relaxes the AND, so it should
+        # produce *more* entries, not fewer. Either movement is a pass; no
+        # movement is a dead switch.
+        ("buy_macd_enabled", "enter_long", strat.populate_entry_trend),
+        ("buy_bb_enabled", "enter_long", strat.populate_entry_trend),
+        ("buy_rsi_enabled", "enter_long", strat.populate_entry_trend),
+        ("adx_enabled", "enter_long", strat.populate_entry_trend),
+        ("volume_enabled", "enter_long", strat.populate_entry_trend),
     ]
+    regimes = [
+        _make_dataframe(seed=20260917, phase=12.0),
+        _make_dataframe(seed=7, phase=9.0),
+        _make_dataframe(seed=99, phase=15.0),
+        _make_dataframe(seed=4242, phase=6.0),
+    ]
+
     for attr, col, fn in cases:
         param = getattr(cls, attr, None)
         if param is None:
             print(f"    --    {attr} not present, skipped")
             continue
         original = param.value
+        moved = 0
+        sample = ""
         try:
-            param.value = True
-            on = int((fn(df.copy(), {"pair": "BTC/CAD"})[col] == 1).sum())
-            param.value = False
-            off = int((fn(df.copy(), {"pair": "BTC/CAD"})[col] == 1).sum())
+            for i, regime in enumerate(regimes):
+                param.value = True
+                on = int((fn(regime.copy(), {"pair": "BTC/CAD"})[col] == 1).sum())
+                param.value = False
+                off = int((fn(regime.copy(), {"pair": "BTC/CAD"})[col] == 1).sum())
+                if on != off:
+                    moved += 1
+                    if not sample:
+                        sample = f"e.g. {on} -> {off} on shape {i + 1}"
         finally:
             param.value = original
-        mark = "ok   " if on != off else "FAIL "
-        print(f"    {mark} {attr:20} on={on:4}  off={off:4}")
-        if on == off:
+
+        # A condition that is correctly wired can still fail to bind on any one
+        # dataset, because another condition already excludes those candles. So
+        # the test asks whether the switch moves the outcome on ANY shape. Only
+        # a switch that never moves it - which is what the dropped-conditions
+        # bug produced - is dead.
+        mark = "ok   " if moved else "FAIL "
+        print(f"    {mark} {attr:20} moved on {moved}/{len(regimes)} shapes  {sample}")
+        if not moved:
             problems.append(
-                f"{attr} changes nothing ({on} signals either way): the switch is "
-                "not wired to the signal it claims to control."
+                f"{attr} changed nothing on any of {len(regimes)} market shapes: "
+                "the switch is not wired to the signal it claims to control."
+            )
+    return problems
+
+
+def _check_reachability(strat, cls) -> list:
+    """Every entry path must be reachable on at least one market shape.
+
+    The trend path once required an EMA crossover AND a MACD crossover on the
+    same candle, which fired zero times on every shape: the strategy was
+    described as trend-following and was in practice mean-reversion only.
+
+    Reachability is asserted rather than a per-shape count, because five ANDed
+    conditions make a trend entry genuinely uncommon and some shapes will
+    legitimately produce none. What must never happen is a path that is
+    unreachable everywhere - which is exactly what the bug produced.
+    """
+    problems = []
+    print()
+    print("  Entry paths reachable across market shapes:")
+    shapes = [(20260917, 12.0), (7, 9.0), (99, 15.0), (4242, 6.0), (1234, 18.0)]
+    seen: dict = {}
+    for seed, phase in shapes:
+        d = _make_dataframe(seed=seed, phase=phase)
+        out = strat.populate_entry_trend(d.copy(), {"pair": "BTC/CAD"})
+        tags = out.loc[out["enter_long"] == 1, "enter_tag"].value_counts().to_dict()
+        for k, v in tags.items():
+            seen[k] = seen.get(k, 0) + v
+    print(f"        totals across {len(shapes)} shapes: {seen or 'none'}")
+    for path in ("trend_follow", "mean_reversion"):
+        mark = "ok   " if seen.get(path) else "FAIL "
+        print(f"    {mark} {path:18} {seen.get(path, 0)} signal(s)")
+        if not seen.get(path):
+            problems.append(
+                f"entry path {path!r} never fired on any of {len(shapes)} market "
+                "shapes - that path is unreachable."
             )
     return problems
 
@@ -310,10 +413,13 @@ def main() -> int:
 
     strat = cls(config={"stake_currency": "CAD"})
     df = _make_dataframe()
+    fired_paths: set = set()
 
     problems = []
-    problems += _check("populate_entry_trend", df, strat.populate_entry_trend, "enter_long")
+    problems += _check("populate_entry_trend", df, strat.populate_entry_trend,
+                       "enter_long", fired_paths)
     problems += _check("populate_exit_trend", df, strat.populate_exit_trend, "exit_long")
+    problems += _check_reachability(strat, cls)
     problems += _check_switches(strat, df, cls)
 
     print()
