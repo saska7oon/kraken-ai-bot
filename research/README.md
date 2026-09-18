@@ -12,6 +12,7 @@ repeating it.
 | File | Lines | What it is |
 |---|---|---|
 | `fee-ceiling-and-quote-currency.md` | 232 | **Read this first.** The fee-drag formula (`turnover × rate`; account size cancels), the corrected 53.5%/yr figure, proof that no fee-reduction avenue is open, and why USDT is not tradeable in Canada. |
+| `small-account-plan.md` | 260 | A core–satellite plan for this account size, **with a critique appended**: three of its claims are marked as not accepted, and its own Phase 5 item may dominate the whole plan. |
 | `canadian-crypto-tax-usdt-report.md` | 539 | CRA treatment of crypto-to-crypto, business-income vs capital-gains factors, and the finding that **Kraken Canada prohibits USDT entirely**. |
 | `regime-strategies-report.md` | 666 | Strategies organised by market regime, with exact rules. **Scoped to a 5-minute timeframe this bot no longer uses.** |
 | `strategy-count-and-overfitting-sources.md` | 782 | How many configurations a small account can afford to test, with peer-reviewed numbers. |
