@@ -138,6 +138,11 @@ jobs:
       - name: Strategy naming
         run: python3 ai_orchestrator/tests/test_strategy_naming.py
 
+      # Two ways to pick a risk level (the panel and the assistant) had drifted
+      # to seven contradictory values. Nothing compared them until this.
+      - name: A risk level means one thing
+        run: python3 ai_orchestrator/tests/test_risk_levels.py
+
       - name: Configuration preflight
         run: python3 tools/preflight_config.py
 

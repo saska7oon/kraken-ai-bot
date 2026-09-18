@@ -87,6 +87,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ai_orchestrator.core import settings_store
 from ai_orchestrator.core.freqtrade_api import FreqtradeAPIError, UnsupportedOperation
 from ai_orchestrator.core.plugin_manager import BasePlugin, PluginConfig
+from ai_orchestrator.core.settings_store import RISK_PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +369,24 @@ class PendingProposal:
             "changes": self.changes,
             "message": self.message,
         }
+
+
+#: Human-readable phrasing for a risk-preset value, derived from the value.
+#:
+#: These used to be hand-written strings sitting next to each number, in a second
+#: copy of the presets that had drifted from the first. Generating them removes
+#: the only way a description can disagree with the value it describes - which is
+#: how "Use at most 80% of the wallet" came to sit beside a panel saying 50%.
+def _describe_risk_value(key: str, value: Any) -> str:
+    if key == "max_open_trades":
+        return f"At most {value} trades at once"
+    if key == "stoploss":
+        return f"Stop loss of {abs(float(value)) * 100:.0f}%"
+    if key == "tradable_balance_ratio":
+        return f"Use at most {float(value) * 100:.0f}% of the wallet"
+    if key == "trailing_stop_positive":
+        return f"Follow profit from {float(value) * 100:.1f}%"
+    return f"{key} = {value}"
 
 
 class NLConfigPlugin(BasePlugin):
@@ -1217,44 +1236,32 @@ Examples:
         """
         Map a risk profile to a set of proposals.
 
-        All values stay inside BOUNDS; the 'aggressive' profile is flagged so the
-        operator has to think about it explicitly.
-        """
-        profiles: Dict[str, List[Dict[str, Any]]] = {
-            "conservative": [
-                {"key": "max_open_trades", "value": 2, "description": "At most 2 trades at once"},
-                {"key": "stoploss", "value": -0.05, "description": "Stop loss of 5%"},
-                {"key": "trailing_stop_positive", "value": 0.015, "description": "Follow profit from 1.5%"},
-                {"key": "tradable_balance_ratio", "value": 0.80, "description": "Use at most 80% of the wallet"},
-            ],
-            "moderate": [
-                {"key": "max_open_trades", "value": 3, "description": "At most 3 trades at once"},
-                {"key": "stoploss", "value": -0.08, "description": "Stop loss of 8%"},
-                {"key": "trailing_stop_positive", "value": 0.02, "description": "Follow profit from 2%"},
-                {"key": "tradable_balance_ratio", "value": 0.90, "description": "Use at most 90% of the wallet"},
-            ],
-            "aggressive": [
-                {"key": "max_open_trades", "value": 4, "description": "At most 4 trades at once"},
-                {"key": "stoploss", "value": -0.12, "description": "Stop loss of 12%"},
-                {"key": "trailing_stop_positive", "value": 0.03, "description": "Follow profit from 3%"},
-                {"key": "tradable_balance_ratio", "value": 0.95, "description": "Use up to 95% of the wallet"},
-            ],
-        }
+        The values come from settings_store.RISK_PRESETS, which is the single
+        definition of what each level means. This method used to carry its own
+        copy, and the two had drifted apart on seven values - "conservative" set
+        tradable_balance_ratio to 0.80 here and 0.50 in the settings panel. Two
+        answers to the same question, and the operator would only ever see one of
+        them depending on whether they typed or clicked.
 
-        profile = profiles.get(risk_level)
+        Descriptions are generated from the values rather than hand-written, so a
+        number can no longer be described as something it is not.
+        """
+        profile = RISK_PRESETS.get(risk_level)
         if profile is None:
             return [
                 {
                     "type": "clarification",
                     "description": (
-                        "Choose one of: conservative, moderate or aggressive."
+                        "Choose one of: "
+                        + ", ".join(sorted(RISK_PRESETS))
+                        + "."
                     ),
                 }
             ]
 
         changes = [
-            self._config_change(item["key"], item["value"], item["description"])
-            for item in profile
+            self._config_change(key, value, _describe_risk_value(key, value))
+            for key, value in profile["values"].items()
         ]
 
         if risk_level == "aggressive":

@@ -376,7 +376,7 @@ a.link:hover{text-decoration:underline}
     <div class="stat"><div class="k">Balance</div><div class="v mono" id="s-balance">&mdash;</div><div class="d" id="s-balance-d"></div></div>
     <div class="stat"><div class="k">Profit</div><div class="v mono" id="s-profit">&mdash;</div><div class="d" id="s-profit-d"></div></div>
     <div class="stat"><div class="k">Open trades</div><div class="v mono" id="s-open">&mdash;</div><div class="d" id="s-open-d"></div></div>
-    <div class="stat"><div class="k">Strategy</div><div class="v mono" id="s-strategy" style="font-size:17px">&mdash;</div><div class="d" id="s-strategy-d"></div></div>
+    <div class="stat"><div class="k">Strategy</div><div class="v mono" id="s-strategy" style="font-size:17px">&mdash;</div><div class="d" id="s-strategy-d"></div><div class="d" id="s-strategy-note"></div></div>
   </div>
 
   <div class="grid">
@@ -621,6 +621,15 @@ async function loadStatus() {
   if (s.description) stratBits.push(s.description);
   if (s.timeframe) stratBits.push(s.timeframe + " candles");
   $("s-strategy-d").textContent = stratBits.join(" \u00b7 ");
+
+  // The strategy is fixed when the stack is deployed, and the app ships exactly
+  // one. Without saying so, this card looks like a control that is failing to
+  // update: ask the assistant to change strategy, approve it, and this still
+  // shows the old name - correctly, because the running bot is still running it.
+  // Risk level is the thing that IS changeable, and it is a different thing.
+  $("s-strategy-note").textContent =
+    "Set when the stack is deployed, so changing it needs a redeploy. "
+    + "Risk level is separate \u2014 that one applies immediately.";
 
   clear($("details"));
   const rows = [

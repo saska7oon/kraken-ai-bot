@@ -218,6 +218,18 @@ DERIVED_KEYS: Tuple[str, ...] = ("db_url",)
 #: One choice instead of three numbers. The README already described these
 #: profiles in prose; this makes them selectable, which is the difference between
 #: a paragraph someone has to translate into settings and a button.
+#:
+#: THIS IS THE ONLY DEFINITION. It used to exist twice - here and again inside
+#: nl_config._get_risk_config - and the two copies disagreed on seven values.
+#: Asking the assistant for "conservative" set tradable_balance_ratio to 0.80
+#: while pressing the Conservative button set it to 0.50: the same word, 60% more
+#: capital at risk, from two places an operator would reasonably assume agreed.
+#: Nothing caught it because nothing compared them. test_risk_levels.py now does.
+#:
+#: The values kept are the curated ones, because these are the ones shown next to
+#: their labels and blurbs. trailing_stop_positive came from the other copy - it
+#: was the one thing that table had and this did not, and dropping it would have
+#: silently stopped the assistant setting a trailing stop at all.
 RISK_PRESETS: Dict[str, Dict[str, Any]] = {
     "conservative": {
         "label": "Conservative",
@@ -226,6 +238,7 @@ RISK_PRESETS: Dict[str, Dict[str, Any]] = {
             "max_open_trades": 2,
             "stoploss": -0.04,
             "tradable_balance_ratio": 0.50,
+            "trailing_stop_positive": 0.015,
         },
     },
     "moderate": {
@@ -235,6 +248,7 @@ RISK_PRESETS: Dict[str, Dict[str, Any]] = {
             "max_open_trades": 3,
             "stoploss": -0.08,
             "tradable_balance_ratio": 0.90,
+            "trailing_stop_positive": 0.02,
         },
     },
     "aggressive": {
@@ -244,6 +258,7 @@ RISK_PRESETS: Dict[str, Dict[str, Any]] = {
             "max_open_trades": 5,
             "stoploss": -0.15,
             "tradable_balance_ratio": 0.95,
+            "trailing_stop_positive": 0.03,
         },
     },
 }
