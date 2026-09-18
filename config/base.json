@@ -146,11 +146,36 @@
     // candle moves 0.076% in total, so 1.60% of fees is roughly 21 candles' worth
     // of movement to break even.
     //
-    // Taker rather than maker, deliberately. The bot places limit orders, which
-    // CAN earn the maker rate - but price_side "same" puts them at the touch of
-    // the book, where they often fill immediately and are charged as taker.
-    // Assuming the better rate would repeat the same mistake in the opposite
-    // direction: a simulation that flatters the strategy.
+    // Taker rather than maker - but NOT for the reason first written here.
+    //
+    // CORRECTION. This block previously claimed the bot's limit orders "sit at
+    // the touch of the book, where they often fill immediately and are charged as
+    // taker". That is wrong, and the source says so. From
+    // freqtrade/exchange/exchange.py::_get_price_side:
+    //
+    //     ("entry", "long", "same"): "bid",     <- our config
+    //     ("exit",  "long", "same"): "ask",     <- our config
+    //
+    // price_side "same" on a long entry prices at the BID, which is a resting buy
+    // order - a maker order. Same on the exit side at the ask. So the bot is
+    // already configured to pay the maker rate on both legs, and the real round
+    // trip on the normal path is 0.80%, not 1.60%.
+    //
+    // The taker rate is still what is charged here, deliberately, for two reasons
+    // that the mapping does not capture:
+    //
+    //   1. Stoploss and emergency_exit are market orders by freqtrade's default
+    //      (see the explicit order_types block below). Those exits cross the
+    //      spread and pay 0.80%. A stoploss exit therefore costs 0.40% + 0.80%.
+    //   2. A resting order only fills when the market comes to it, which is
+    //      adverse selection: the bid gets hit while price is falling. The fill
+    //      is real, the price is worse.
+    //
+    // So the true figure sits between 0.40% and 0.80% per side depending on how
+    // often stops trigger, and it is not knowable in advance. Charging the worst
+    // case keeps the simulation on the pessimistic side - a strategy that looks
+    // viable at 0.008 is genuinely robust, whereas one tuned to pass at 0.004
+    // would be tuned to a number the config cannot actually guarantee.
     //
     // Only affects simulation. Freqtrade honours this key ONLY in dry run:
     //
@@ -199,6 +224,59 @@
         "use_order_book": true,
         "order_book_top": 1,
         "price_last_balance": 0.0
+    },
+
+    // -------------------------------------------------------------------------
+    // ORDER TYPES
+    // -------------------------------------------------------------------------
+    // Written out explicitly rather than left to freqtrade's defaults, because
+    // these decide the fee and the fee is what decides whether anything here can
+    // work. Left implicit, they are invisible - which is how the bot ended up
+    // trading on a 5m timeframe with a fee nobody had checked.
+    //
+    // entry / exit are "limit". Combined with price_side "same" above, that is a
+    // resting order on both legs: buy at the bid, sell at the ask, and the maker
+    // rate of 0.40% rather than the taker rate of 0.80%.
+    //
+    // stoploss and emergency_exit are "market" on purpose. A stoploss exists to
+    // get you out, and a limit order at a price that is running away does not
+    // fill - you would keep the position and the loss. Paying the taker rate to
+    // actually be out is the correct trade. This is also why the `fee` above is
+    // charged at the taker rate.
+    //
+    // force_entry / force_exit are the manual buttons in the UI. Market, because
+    // when the operator clicks "sell now" they mean now.
+    "order_types": {
+        "entry": "limit",
+        "exit": "limit",
+        "emergency_exit": "market",
+        "force_entry": "market",
+        "force_exit": "market",
+        "stoploss": "market",
+        "stoploss_on_exchange": false
+    },
+
+    // -------------------------------------------------------------------------
+    // UNFILLED ORDER TIMEOUT
+    // -------------------------------------------------------------------------
+    // A resting limit order may never be reached. Without a timeout it sits there
+    // forever, the bot holds a stale view of the market, and the position is
+    // neither entered nor abandoned.
+    //
+    // 5 minutes is freqtrade's own default, kept because at a 1h timeframe a
+    // candle lasts an hour and a fill that has not happened in five minutes is
+    // unlikely to happen at that price. On timeout freqtrade cancels and
+    // re-evaluates on the next candle, which is the behaviour we want.
+    //
+    // The cost of this choice is real and worth naming: a cancelled entry is a
+    // missed trade, so a maker-only bot trades less often than a taker one. That
+    // is the trade being made deliberately - fewer trades at half the fee, rather
+    // than more trades at double it.
+    "unfilledtimeout": {
+        "entry": 5,
+        "exit": 5,
+        "exit_timeout_count": 0,
+        "unit": "minutes"
     },
 
     // -------------------------------------------------------------------------

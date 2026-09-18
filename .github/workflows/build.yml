@@ -160,6 +160,11 @@ jobs:
       - name: The three time units agree
         run: python3 ai_orchestrator/tests/test_timeframe_units.py
 
+      # "limit" does not mean maker. Only limit + price_side "same" rests on the
+      # book; "other" crosses the spread and doubles the fee, silently.
+      - name: The bot pays the maker rate it is configured for
+        run: python3 ai_orchestrator/tests/test_order_types.py
+
       - name: Configuration preflight
         run: python3 tools/preflight_config.py
 
