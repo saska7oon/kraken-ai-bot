@@ -168,19 +168,25 @@ table converts a **risk** into a **lever**, which overstates the case. Treat
 $74 as *"the most this could cost if it goes the wrong way"*, not as available
 upside.
 
-## C.2 Minimum dwell does not improve statistical power
+## C.2 Minimum dwell does not improve statistical power *here*
 
 The keystone claim is that a ≥30-day dwell plus a 30-day cooldown fixes "fees,
 taxes, superficial losses, **AND statistical power** simultaneously."
 
-The first three follow. **The fourth does not.** Longer dwell means *fewer*
-trades, and §4 of the README establishes that this strategy already has too few
-samples (14 trades; needs ~200–1,000). A dwell floor **caps** the trade count; it
-cannot raise it.
+The first three follow. **The fourth does not, for this bot.**
 
-It is defensible as a *constraint* — it keeps you inside the fee and tax
-envelope so that the trades you do take are affordable — but that is not the
-same as improving power. **Three of four, not four.**
+The plan's phrase is *"fewer, more meaningful trades."* That is not
+automatically wrong — power depends on effect size as well as count, so if
+longer holds raise mean/SD per trade faster than √N falls, fewer trades can be
+*better* evidence. **But that is not what happens here.** This bot already holds
+roughly **36 days on average** (14 round trips across 17 months), so a 30-day
+floor sits *below* the current behaviour and changes nothing about hold length.
+It therefore **caps N without raising per-trade effect size** — strictly worse
+for power, not better.
+
+It remains a sound *constraint*: it keeps the bot inside the fee and tax
+envelope so the trades it does take are affordable. That is not the same as
+improving power. **Three of four, not four.**
 
 ## C.3 Phase 5 item 2 may dominate the entire plan
 
