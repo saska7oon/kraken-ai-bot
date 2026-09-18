@@ -131,6 +131,45 @@ Buy-and-hold comparison cuts **both** ways and settles nothing:
 Neither establishes skill. **The bot's −8.83% drawdown against B&H's −63.51%
 reflects low exposure — it is in cash most of the time — not risk management.**
 
+**The benchmark is not zero. It is buy-and-hold.** This is the sharpest version
+of the problem, from an out-of-sample audit of **895 public Freqtrade strategies
+across 53 repos** (recomputed from the raw `LEDGER.csv`):
+
+| stage | count |
+|---|---|
+| strategies audited | **895** |
+| dropped at the first gate | **878** |
+| survived every gate | **2** |
+| …of those, beat buy-and-hold | **0** |
+
+The decisive row is `CombinedBinHClucAndMADV5`: **1,295 out-of-sample trades,
++0.46%/trade, p = 8.4 × 10⁻¹⁵, positive 95% CI lower bound** — an edge *no
+statistician would dispute*, which survived lookahead detection, recursion
+detection, significance testing and economic screening. **It returned +106.91%
+against buy-and-hold's +346.34% — it lost to doing nothing by 239 percentage
+points.**
+
+**28 strategies did beat buy-and-hold — and every one failed a robustness gate**
+(9 in-sample not significant, 6 lookahead bias, 5 too few trades, 3
+out-of-sample not significant, 3 recursive, 2 not positive in-sample). The
+lookahead failures show the trap: `NOTankAi_15_Cleaned_v2` at **+63,645,298%**,
+`ichiV1` at **+18,701,080%**. A strategy returning 63 million percent is not a
+great strategy — it is a broken one. **455 of 895 (51%) are flagged recursive.**
+
+So the operational question is not *"does this bot have an edge?"* but
+***"does it beat doing nothing?"*** — and for this bot "doing nothing" means
+holding the same four pairs. **Always report buy-and-hold on the identical
+window, across multiple start dates.** Without it, `+13.67%` is uninterpretable.
+
+**Treat the audit as suggestive, not conclusive** — it is one unreplicated
+amateur pipeline (3 stars, 0 forks, single author, ~65% of the corpus is
+copies), its README prose contradicts its own ledger, and the author's own
+year-split shows the verdict **flips with market direction** (0 of 5 beat B&H in
+up years, 5 of 5 in down years). What makes it count is that it is the **fifth
+independent dataset reaching the same conclusion**: Hudson & Urquhart's 15,000
+rules, Borgards' six-year crypto study, the 888 Quantopian algorithms
+(IS→OOS Sharpe R² = 0.02), a local Monte Carlo, and now this.
+
 Two independent peer-reviewed lines agree on where the honest case lies:
 Hudson & Urquhart (~15,000 technical rules) found many beat buy-and-hold on
 risk-adjusted return and drawdown, but only **4.96–15.69% beat it on raw
@@ -199,6 +238,19 @@ record at all**. Full evidence in `small-account-algo-trading.md` and
   imply Calmar **4.06**, and 73 contradicts its own stated Sharpe of 0.37 —
   **18× overstated**. It is retained as evidence of what these repos claim, not
   as a strategy.
+- **Two recovered live cases worth reading before scaling anything.**
+  A bot with **2,729 live trades over 60 days** finished at profit factor
+  **1.15** against a ≥1.3 target, win rate **33.6%** against ≥45%, and a maximum
+  losing streak of **18** against ≤5. The operator's verdict: *"The system
+  didn't lose money. It just never earned the right to scale."* He also found
+  that *"at points, 100% of live positions sat in one coin (ADA), and I never
+  decided that"* — the concentration risk this archive documents elsewhere,
+  appearing live. Separately, a **$1,000 paper account with 480 trades** and
+  *"up about $25"* asked whether it was ready to go live. By the SQN identity it
+  needs mean/SD > 0.089 and has roughly **0.003 — about 20× short.**
+- **Comment threads and Freqtrade's Discord remain unretrieved** — the largest
+  unreachable evidence source left. One recovered case now carries
+  `removal_type: "deleted"`, so the public record is shrinking, not stable.
 
 ## What is deliberately not committed here
 

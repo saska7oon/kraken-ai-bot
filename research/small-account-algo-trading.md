@@ -31,9 +31,10 @@
 7. **The base rates are brutal and they are consistent across every independent dataset.** Every population-scale study lands in a **70–97% loss band**: ESMA 74–89%, FCA 82%, ASIC 63–80%, BIS crypto-app data 73–81%, Taiwan "more than eight out of ten", Brazil 97% of those who persisted 300+ days. And the loss rate **rises with persistence** — profit probability *decreases* monotonically with days traded in Brazil, and the FCA found *"inexperienced retail clients lose less money than experienced clients."* §5.
 8. **The "20% of day traders profit" figure that circulates is an annualisation artifact.** It collapses to **under 1%** on a persistent basis (Taiwan: <1% "predictably and reliably"; Brazil: 1.1% beat minimum wage, 0.5% beat a bank teller). §5.2.
 9. **The best available direct test of systematic crypto rules vs buy-and-hold is two-sided, and it agrees with my own computation.** Hudson & Urquhart (2021) tested ~15,000 technical rules: they beat buy-and-hold on **risk-adjusted** returns and drawdowns, but only **4.96–15.69% of rules beat it on raw return**, and **Bitcoin had no out-of-sample predictability**. That is the same pattern I found locally: the bot won on drawdown, lost on return. §5.1c, §8.2.
-10. **The honest case for this bot is drawdown management, not return enhancement — and I am revising my own earlier finding accordingly.** Borgards (2021), a peer-reviewed 6-year crypto study, found low-frequency trend following netted +127% vs buy-and-hold's +186% — *lower return, far lower drawdown*. Separately, my measured +17.6pp quarterly-rebalancing premium (§4.1) is almost certainly a window artifact: El Bernoussi & Rockinger (2023) find the rebalancing premium is **~1.35 basis points per year** and statistically indistinguishable from buy-and-hold at ~1% costs. **I am withdrawing the return-premium interpretation of my own §4.1 result.**
-11. **The general turnover law is the most transferable evidence found.** Novy-Marx & Velikov (2016, RFS): costs reduce realized spreads by >1% of monthly one-sided turnover; high-turnover anomalies went **negative**; only low-turnover ones survived. Their breakeven rule implies gross edge per round trip must exceed **~0.80% of notional traded**, allowing ~**6 full-notional round trips/year** at a 5% gross edge. This bot does ~3/year — **inside the survivable band, which is why fees are not its problem.** §4.4.
-12. **Honest answer to "should a small account trade systematically at all?"** On the evidence available: the burden of proof has **not** been met by this bot, and the fee, tax and base-rate structure all penalise trading relative to holding or rebalancing. But the evidence does **not** prove it cannot work — a minority of rules and traders do persist, and the drawdown-reduction benefit is real and documented. The defensible framing is **not** "this makes money" but "this may reduce drawdown, at the cost of expected return, and its edge is unproven." See §5, §8.4, and §11.
+10. **The capstone finding: a statistically bulletproof edge can still be the wrong choice.** [VERIFIED-URL] I independently recomputed `Apex-prim/strategy-audit` from its raw `LEDGER.csv` (895 public freqtrade strategies from 53 repos). **878 were dropped at the first gate; only 2 survived every gate; and 0 of those 2 beat buy-and-hold.** The decisive row, `CombinedBinHClucAndMADV5`, has **1,295 out-of-sample trades, +0.46%/trade, p = 8.4 × 10⁻¹⁵, and a positive 95% CI lower bound** — an edge that is genuine by every statistical test — **and it still returned +106.91% against buy-and-hold's +346.34%, losing by 239pp.** **28 strategies did beat buy-and-hold, and every one failed a robustness gate.** The question is not *"does my bot have an edge?"* but *"does it beat doing nothing?"* §5.1d.
+11. **The honest case for this bot is drawdown management, not return enhancement — and I am revising my own earlier finding accordingly.** Borgards (2021), a peer-reviewed 6-year crypto study, found low-frequency trend following netted +127% vs buy-and-hold's +186% — *lower return, far lower drawdown*. Separately, my measured +17.6pp quarterly-rebalancing premium (§4.1) is almost certainly a window artifact: El Bernoussi & Rockinger (2023) find the rebalancing premium is **~1.35 basis points per year** and statistically indistinguishable from buy-and-hold at ~1% costs. **I am withdrawing the return-premium interpretation of my own §4.1 result.**
+12. **The general turnover law is the most transferable evidence found.** Novy-Marx & Velikov (2016, RFS): costs reduce realized spreads by >1% of monthly one-sided turnover; high-turnover anomalies went **negative**; only low-turnover ones survived. Their breakeven rule implies gross edge per round trip must exceed **~0.80% of notional traded**, allowing ~**6 full-notional round trips/year** at a 5% gross edge. This bot does ~3/year — **inside the survivable band, which is why fees are not its problem.** §4.4.
+13. **Honest answer to "should a small account trade systematically at all?"** On the evidence available: the burden of proof has **not** been met by this bot, and the fee, tax and base-rate structure all penalise trading relative to holding or rebalancing. But the evidence does **not** prove it cannot work — a minority of rules and traders do persist, and the drawdown-reduction benefit is real and documented. The defensible framing is **not** "this makes money" but "this may reduce drawdown, at the cost of expected return, and its edge is unproven." See §5, §8.4, and §8b.
 
 ---
 
@@ -391,6 +392,75 @@ This is the closest thing to the study the user asked for: **~15,000 technical t
 
 **Applicability caveat [REASONING]:** CFD/forex evidence is about **leveraged derivatives with margin close-out**. This bot is **spot, no leverage, no liquidation**. That makes the bot structurally safer than a CFD account, and it means the CFD loss rates are a *directional* prior about retail active trading, not a direct prediction for this account. I am flagging this rather than over-claiming.
 
+### 5.1d The largest independent audit of public Freqtrade strategies — the sharpest evidence in this report
+
+**[VERIFIED-URL] I downloaded and independently recomputed this myself.** `Apex-prim/strategy-audit` — <https://github.com/Apex-prim/strategy-audit> — an out-of-sample audit of **895 public freqtrade strategies drawn from 53 repositories**, run through freqtrade itself. MIT licensed. Repo metadata I verified via the GitHub API: created **2026-08-20**, last pushed 2026-08-24, **3 stars, 0 forks**.
+
+I fetched `LEDGER.csv` (**233,709 bytes, 895 data rows, 23 columns**) and computed the endpoints from the raw data rather than accepting the prose.
+
+**My independent computation of the funnel:**
+
+| Stage | Count |
+|---|---|
+| Total strategies audited | **895** |
+| Dropped at the **first** gate (E0) | **878** |
+| Reached E1 | 15 |
+| **Survived every gate (E6)** | **2** |
+| **…of those, beat buy-and-hold** | **0** |
+
+**The two survivors, with their exact ledger values:**
+
+| Strategy | OOS return | Buy-and-hold | OOS trades | Avg/trade | p | 95% CI lower |
+|---|---|---|---|---|---|---|
+| `ClucHAnix_5m_old` | **+111.99%** | +346.34% | 2,190 | +0.29% | 6.489e-05 | +0.1477 |
+| `CombinedBinHClucAndMADV5` | **+106.91%** | +346.34% | 1,295 | +0.46% | 8.407e-15 | +0.3438 |
+
+**This is the capstone result of the entire report, and it is sharper than "backtests are unreliable."** `CombinedBinHClucAndMADV5` has an edge that is statistically **bulletproof** by every test in §8.3b: **1,295 out-of-sample trades**, **+0.46%/trade**, **p = 8.4 × 10⁻¹⁵**, and a **positive 95% confidence-interval lower bound**. It survived lookahead detection, recursion detection, significance testing and economic screening. **And it still returned +106.91% against buy-and-hold's +346.34% — it lost to doing nothing by 239 percentage points.**
+
+**[REASONING] That is the single most useful sentence in this research for the user's actual question.** A strategy can have a *genuine, statistically unassailable* edge and still be the wrong choice, because **the benchmark is not "zero," it is "buy and hold the coins."** The question for a small account is therefore not *"does my bot have an edge?"* but ***"does it beat doing nothing?"***
+
+**A correction to the delegated thread's framing, which I verified myself.** The thread reported *"0 of 456 eligible ones beat buy-and-hold."* **That is not what the ledger says.** My computation from the CSV:
+
+- **496** rows carry a `beats_bh` verdict (not 456). Of those, **28 are `True`** — **28 strategies did beat buy-and-hold.**
+- **0 of the 2** that survived *every* gate beat buy-and-hold.
+
+**The correct statement is stronger and more instructive than the incorrect one:** 28 strategies beat buy-and-hold, and **every single one of them failed a robustness gate.** Their failure reasons:
+
+| Failed gate | Count | Meaning |
+|---|---|---|
+| `G3_is_sig` | 9 | in-sample result not significant |
+| `G6_lookahead` | 6 | **lookahead bias** |
+| `G1_trades` | 5 | too few trades |
+| `G5_os_sig` | 3 | out-of-sample not significant |
+| `G7_recursive` | 3 | **recursive / repainting** |
+| `G2_is_pos` | 2 | in-sample not even positive |
+
+**The lookahead failures are worth seeing, because they show what the trap looks like when you fall into it** — these are the "winners" that beat buy-and-hold and would top any leaderboard:
+
+| Strategy | Claimed OOS return | Why it died |
+|---|---|---|
+| `NOTankAi_15_Cleaned_v2` | **+63,645,298%** | recursive |
+| `NOTankAi_15_Cleaned` | +29,748,386% | recursive |
+| `ichiV1` | +18,701,080% | lookahead |
+| `grad` | +12,741,211% | lookahead |
+| `LookaheadStrategy` | +2,578,140% | lookahead |
+| `Rsiqui` | +410,480% | lookahead |
+
+**[REASONING]** A strategy returning **63 million percent** is not a great strategy; it is a broken one. This is the same failure mode as the `DevilStra` lookahead example already in this repo's `research/gh/official_strats/` directory — and note that the top of the leaderboard is populated almost entirely by lookahead and recursion artifacts.
+
+**[VERIFIED-URL] Corpus-wide flags I computed:** **455 of 895 strategies (51%)** are flagged `recursive = НАЙДЕНО` ("found"), and **40** are flagged `lookahead = НАЙДЕНО`. The largest single drops are at `G0_measured` (399) and `G2_is_pos` (298 — strategies that were not even positive in-sample).
+
+**Caveats — stated prominently, because this is one unreplicated amateur audit:**
+1. **Unreplicated, single author, 3 stars, 0 forks.** It is one person's pipeline, never independently reproduced.
+2. **The author's own `freeze_guard.py` labels the corpus "repair-adjusted," not pre-registered** — the last two gates were added ~15 hours after the first result card. That is post-hoc modification.
+3. **~65% of the corpus consists of copies**, so 895 is not 895 independent bets.
+4. **The author's own year-split shows the aggregate verdict depends on market direction** — 0 of 5 beat buy-and-hold in up years, 5 of 5 in down years. **The conclusion is window-dependent**, exactly as §8.2 showed locally.
+5. **The author documents having previously published wrong numbers** ("571 strategies, 55 clean"). That transparency distinguishes this from the folklore sources in §8.3c — but it also means these numbers are a *revision*.
+6. **My own finding of an internal misalignment:** of the **55** rows dropped at `G6_lookahead`, **49 have `lookahead = НЕ ПРИМЕНИМА`** ("not applicable") — failed by a gate whose flag column says the check did not apply. Either "not applicable" defaults to failure, or the columns are out of sync. **I could not resolve which.**
+7. **I could not reproduce the intermediate funnel** without the author's gate thresholds, and the README's prose ("66 survive / 4 beat") **contradicts its own ledger block**.
+
+**[REASONING] How much weight should this carry?** As one unreplicated audit, it is suggestive, not conclusive. But it is **directionally consistent with every other independent line of evidence in this report**: Hudson & Urquhart's 15,000 rules (§5.1c), Borgards' 6-year crypto trend study (§4.5), the 888 Quantopian algorithms (§8.3c), and my own local computation (§8.2). **Five independent datasets, five different methods, one conclusion.**
+
 ### 5.2 Peer-reviewed day-trader evidence, with the cost assumption stated
 
 [VERIFIED-URL] Barber, Lee, Liu, Odean & Zhang, "Do Day Traders Rationally Learn About Their Ability?", working paper dated October 2017, fetched as PDF from Odean's Berkeley faculty page and text-extracted this session — <https://faculty.haas.berkeley.edu/odean/papers/Day%20Traders/Day%20Trading%20and%20Learning%20110217.pdf>
@@ -550,6 +620,32 @@ See §8.2. The headline: **depending on the start date, buy-and-hold either crus
 - The most search-visible "small capital live trading" case study presents anonymous "User A / User B" and a precise-sounding "First Week Summary" (28 trades, +4.56%) that is **dated 2023 inside a 2025 article** — illustrative template data attached to a course funnel.
 
 **[REASONING] This asymmetry is the mechanism by which a small-account operator ends up with a bad strategy.** Losses are published by hobbyists with no audience; profits are *claimed* by vendors with referral incentives and no data. A person researching "does this work at $1,000?" encounters a literature that is **biased in both directions at once** — survivorship in what is advertised, and near-invisibility in what fails. The honest conclusion, which the thread states and I endorse: **the base rate is unknown, the mechanism of failure is well established, and the published evidence is systematically unreliable.**
+
+### 6b.5 Community cases, recovered after the archive route was found
+
+**Important methodological note:** Reddit was initially written off as inaccessible (reddit.com, old.reddit.com, the JSON API and every Redlib mirror all failed). The delegated thread found that the **Arctic Shift archive API** (`arctic-shift.photon-reddit.com/api/posts/ids?ids=<id>`) returns full post bodies, and pulled and read each post. **This partially resolves a gap I had flagged as closed** — see §9 item 20.
+
+**[PRACTITIONER] The best-documented live small-account case found.** r/algotrading post `1tyc4nb` — **2,729 live trades over 60 days**:
+
+| Target | Target value | Live result |
+|---|---|---|
+| Profit factor | ≥ 1.3 | **1.15** |
+| Win rate | ≥ 45% | **33.6%** |
+| Max losing streak | ≤ 5 | **18** |
+
+The author's own verdict: *"**The system didn't lose money. It just never earned the right to scale. Verdict: weak edge.**"* Two of his lessons are independently valuable and echo this report's findings:
+- *"nothing in a backtest punishes a strategy for failing to adapt"*
+- *"at points, **100% of live positions sat in one coin (ADA), and I never decided that**"* — **[REASONING] the correlation-concentration risk that [LOCAL] this repo's own `strategy-count-and-overfitting-sources.md` documents (four pairs at 0.775 average pairwise correlation ≈ 1.3 effective bets) is not hypothetical; here it materialised in a live account.**
+
+**[PRACTITIONER] The "few trades" trap, stated as a real person's question.** r/algotrading `1tdeu7b` (**score 112** — the most-engaged case found): **$1,000 paper account, 4 weeks, ~480 trades, "up about $25."** The author asks: *"Is 480 paper trades enough to have any confidence in going live, or am I kidding myself?"*
+
+**[REASONING] The answer is no, and the arithmetic shows by how much.** +$25 on $1,000 over 480 trades = **0.0052% per trade**. By the SQN-is-the-t-statistic identity from §8.3b, significance at N=480 requires **mean/SD > 0.089**; his is roughly **0.003–0.005**, i.e. **about 20× short**. He has enough *trades* and nowhere near enough *edge per trade* — which is precisely the distinction this report is about, and it is the same trap the bot's 14 trades sit in, from the opposite direction.
+
+**[PRACTITIONER] The fragility of the public record.** Four LLM agents each trading ~$1,000: Gemini **−30.85%** (118 trades), Claude −8.33%, GPT +12.75%, Grok **+9.09% on a 19.4% win rate over 36 trades**. **The thread verified via the archive metadata that this post now carries `removal_type: "deleted"`** — it has been removed from Reddit. **[REASONING]** This is a concrete demonstration that community evidence is *ephemeral*: a case can exist, be read, and then vanish, which means any survey of this literature is a snapshot of a shrinking record.
+
+**[PRACTITIONER] The one case with published raw artifacts.** `farzinb502-jpg/freqtrade` PR #1 — the thread verified the body and **all 69 changed files** via the GitHub API (including `REPORT.md`, comparison CSVs, raw backtest zips and 13 log files). It tests a marketed "awesome-list" strategy, **TrendRider**, and finds it **−21.77%, profit factor 0.64**, where the engine's own sample strategy gained. Its verdict: *"**Do not go live.**"* and *"**Awesome-list marketing is not evidence.**"*
+
+**[REASONING] This last case is the most valuable of the five**, because it is the only one where a third party can re-run the analysis. Note the direct relevance: [LOCAL] this repo's own `research/freqtrade-strategy-repos-report.md` audited exactly this kind of "awesome-list" strategy corpus. **The one case with artifacts is the one that found a marketed strategy failing.**
 
 ---
 
@@ -745,7 +841,7 @@ Ordered by value-per-effort, all **[REASONING]** unless sourced:
 1. **Keep post-only. Never switch to market orders except for stops.** Worth ~0.80%/round trip (§1.1). Note [LOCAL] the repo's own finding that *"the Donchian exit almost always fires before either stop"* — which means the taker rate is rarely paid, so the effective blended cost is closer to 0.80% than 0.90%.
 2. **Fund only by Interac e-Transfer. Never by debit card.** [VERIFIED-URL] e-Transfer deposit is **free**; debit card costs **0.25 CAD + 3.75%** — about **$56 on a $1,500 deposit**, which is ~4 round trips' worth of fees (§1.6).
 3. **Do not trade to reach Tier 2.** Each extra round trip costs **0.90%** to save at most **0.20%** (§7). The tier is not reachable by trading profitably; it is reachable by growing the account or not at all.
-4. **Always report buy-and-hold on the identical window.** §8.2 shows the same +13.67% reading as a triumph or a failure depending only on the start date. Without this benchmark the number is uninterpretable.
+4. **Reframe the success criterion from "is there an edge?" to "does it beat doing nothing?"** [VERIFIED-URL] This is the operational lesson of the 895-strategy audit (§5.1d): its best survivor had **1,295 out-of-sample trades, p = 8.4 × 10⁻¹⁵ and a positive CI lower bound** — an edge no statistician would dispute — and it still **lost to buy-and-hold by 239 percentage points.** [REASONING] For this bot, "doing nothing" means holding the same four pairs. So the benchmark is not zero, and it is not even a risk-free rate: it is **+53.06%** or **−26.06%** depending on the window (§8.2). **Always report buy-and-hold on the identical window, across multiple start dates.** Without it the +13.67% is uninterpretable.
 5. **Verify the effective minimum stake on all four pairs empirically.** [PRACTITIONER] Freqtrade's maintainer reports minimum stakes *"as high as 60$"* on Kraken, 6–19× above what `ordermin` implies (§1.3). With `max_open_trades: 3` and `tradable_balance_ratio: 0.90`, stakes are ~$300–600, so the margin is real but not large — and the failure mode is **silently skipped trades**, not an error.
 6. **Check whether the 1-candle `CooldownPeriod` creates a superficial-loss problem.** [VERIFIED-URL] A loss is denied if identical property is re-bought within **30 days** (§1.5). Re-entering a stopped-out pair the next day capitalises the loss into the new ACB instead of deducting it. **[REASONING] I have not quantified this and I am not recommending a change** — lengthening the cooldown alters strategy behaviour and could cost more in missed trades than it saves in tax. It is worth *knowing*.
 7. **Set a time budget and a decision rule in advance.** [PEER-REVIEWED] Given IS→OOS Sharpe **R² = 0.02** across 888 real algorithms (§8.3c), no amount of backtesting will settle this. A pre-committed rule — e.g. "if dry-run/live has not produced a positive expectancy after N trades spanning M years, stop" — is the only protection against the persistence the Brazil study documents (*"no evidence of learning"*, §5.2).
@@ -789,9 +885,11 @@ Stated plainly, because filling these gaps with plausible numbers would be worse
 17. **ASIC Report 693** — I originally listed it as a candidate CFD source in my research plan; the thread disproved that. **REP 693 is not the CFD report**; the correct source is **REP 626**. Corrected in §5.1.
 18. **Constantinides (1979)** full text — JSTOR blocked; abstract only. **Sharpe (1991)** and **Grossman–Stiglitz** were not fetched by the strategy thread, so the limits-to-arbitrage argument in §4.4 rests on the verified Novy-Marx & Velikov quotation rather than the originals. *(I did personally verify Sharpe 1991 in full — see §5.3.)*
 19. **A source discrepancy I could not resolve:** the "**73–81% of crypto investors lost money**" figure is attributed to **BIS WP 1049**, but a thread reports it is **not** in BIS Bulletin 69, and that BIS WP 1049's body was verified only from the BIS page summary. **The attribution is unresolved**; treat the number as page-summary-level evidence, not full-text.
-20. **Reddit, Discord, and Freqtrade GitHub Discussions were not examined** — Reddit was inaccessible from this environment, Discord is not archivable, and `freqtrade/freqtrade/discussions` returns HTTP 404. **Consequence: community self-reports of small-account outcomes are absent from this report**, which means §6b.1's "zero verified track records" is a statement about *auditable* records, not proof that no one has succeeded.
+20. ~~**Reddit, Discord, and Freqtrade GitHub Discussions were not examined**~~ **PARTIALLY RESOLVED.** The **Arctic Shift archive API** turned out to work where reddit.com, old.reddit.com, the JSON API and every Redlib mirror failed; community cases are now in §6b.5. **What remains genuinely unreachable:** **comment threads were not retrieved** — which is exactly where an inflated self-report gets challenged — and the **Freqtrade Discord, where this community actually talks, remains unarchivable and unaccessed. That is the single largest unreachable evidence source in this report.** Note also that one retrieved case now carries `removal_type: "deleted"`, so the public record is shrinking, not stable.
 21. **The eToro / *Journal of Financial Economics* retail-crypto paper** was 403-blocked and unread. **Prop-firm pass rates** were searched for and not verified. **No crypto-specific bot-survival study appears to exist.**
 22. **The base rate of backtest survival is genuinely unknown.** The popular "87%" and "90% of backtested strategies fail" figures are **unsourced folklore** — the thread verified this by reading both pages that circulate them (§8.3c). I therefore state the *mechanism* (low IS→OOS R², high PBO under search) and explicitly decline to give a percentage.
+23. **The 895-strategy audit is unreplicated and I could not fully reproduce it.** I confirmed the endpoints and the exact survivor figures from `LEDGER.csv` myself (§5.1d), but **not** the intermediate funnel (the thread got 533/192/106 against the author's 496/158/83) because the author's gate thresholds are not published. The README's prose ("66 survive / 4 beat") **contradicts its own ledger**. And of the 55 rows dropped at `G6_lookahead`, **49 have the lookahead column set to "not applicable"** — an internal misalignment I could not resolve. Treat this source as **suggestive, not conclusive**, and note it is a single author's pipeline with 3 stars that nobody has reproduced.
+24. **Two figures the delegated thread reported that my own computation contradicts.** The thread stated *"0 of 456 eligible strategies beat buy-and-hold."* My computation from the same CSV gives **496 rows with a `beats_bh` verdict, of which 28 are `True`**. I have used **my own verified numbers** throughout §5.1d and flagged the difference rather than adopting the more dramatic claim.
 
 ---
 
@@ -853,9 +951,11 @@ Stated plainly, because filling these gaps with plausible numbers would be worse
 - <https://github.com/francisx1999/crypto-trading-bot-postmortem> — $2,000 post-mortem, 7 strategies all negative
 - <https://raw.githubusercontent.com/Bananajoexxc/RegimeFilterStrategy-Freqtrade/main/README.md> — **the Calmar 73.00 claim I disproved by arithmetic** (also in this repo's `research/gh/`)
 - <https://www.bis.org/publications/bulletin-69-crypto-shocks-and-retail-losses.pdf> — BIS Bulletin 69
-- <https://www.esma.europa.eu/press-news/esma-news/esma-agrees-prohibit-binary-options-and-restrict-cfds-protect-retail-investors> — ESMA press release, the 74–89% figure
 - <https://www.fca.org.uk/publication/consultation/cp16-40.pdf> — FCA CP16/40
 - <https://download.asic.gov.au/media/5241548/rep626-published-22-august-2019.pdf> — ASIC REP 626
+- <https://github.com/Apex-prim/strategy-audit> — **895-strategy audit; I recomputed the endpoints from `LEDGER.csv` myself** (<https://raw.githubusercontent.com/Apex-prim/strategy-audit/main/LEDGER.csv>)
+- <https://github.com/farzinb502-jpg/freqtrade/pull/1> — the only community case with published raw artifacts ("TrendRider" → −21.77%, PF 0.64, verdict "do not go live")
+- Arctic Shift Reddit archive API (`arctic-shift.photon-reddit.com/api/posts/ids?ids=<id>`) — the route that recovered Reddit posts after reddit.com, the JSON API and every Redlib mirror failed
 
 **Explicitly NOT to be cited (unsourced folklore, verified as such):**
 - "**87%** of backtested strategies fail" and "**90%** of trading bots fail" — the pages circulating these cite sources that do not contain the figures (§8.3c)

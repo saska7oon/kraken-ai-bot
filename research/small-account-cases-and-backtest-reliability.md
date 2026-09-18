@@ -33,6 +33,9 @@
 7. **The two most-cited failure rates are fabricated-looking folklore, and I verified this by reading the pages that assert them.** "**87% of backtested strategies fail**" cites only Harvey–Liu–Zhu and Bailey et al. — **neither of which contains that number**. "**90% of trading bots fail**" is never sourced at all, and sits beside four other uncited statistics on a page that *also* correctly cites the 888-strategy study without linking it.
 8. **The base rate is conditional, not constant** — ~53–78% of out-of-sample Sharpe ratios negative for a heavily-mined strategy versus **3%** for a validated one. Quoting a single failure rate destroys the actual finding.
 9. **In the adjacent retail literature, persistence makes things worse, not better.** Among Brazilians who day-traded >300 days, **97% lost money** and only 0.4% out-earned a bank teller; the share who were profitable falls *monotonically* with days traded (29.8% at 1 day → **3.0%** at >300). "No evidence of learning."
+10. **The one large-N audit of *public* strategies found 2 survivors out of 895 — and neither beat simply holding the coins.** I verified this **directly from the project's raw `LEDGER.csv`** (895 rows): only **2** strategies clear every gate, and **0** of 456 eligible ones beat buy-and-hold. The instructive row is `CombinedBinHClucAndMADV5`: **1,295 out-of-sample trades, +0.46% per trade, p = 8.4 × 10⁻¹⁵, positive 95% CI lower bound** — statistically bulletproof by every test in §2 — and still **+106.9% versus buy-and-hold's +346.3%**. **Significance is necessary and nowhere near sufficient.** (§3.2)
+11. **I did find real community small-account cases — by way of a Reddit archive API — and none is a success story.** A **2,729-trade** live crypto post-mortem (the only retail case here with a statistically adequate sample) reports a weak edge that **missed every target**; a **$1,000 / 480-trade** paper account is **~20× short of statistical significance** at +$25; four LLM agents trading ~$1,000 each split 2 losses / 2 statistically meaningless wins; a **$400** account gained ~23% in one week on a BTC rally; and a "6% daily" claim is fantasy. **All self-reported, none audited.** (§1.8)
+12. **The community itself discounts hype.** The honest post-mortem above scored **112**; the "6% daily returns" post scored **0**. Where a reputation signal exists, it points at the right answer.
 
 ---
 
@@ -54,7 +57,9 @@ Two structural reasons the record is so thin, both verified:
 
 **(b) The issue tracker is a bug tracker, not a results log.** I searched the Freqtrade repository's issues via the GitHub API (`https://api.github.com/search/issues`). A query for live/results returned 237 issues and a query for profit/loss/stoploss returned 508 — and **every result I inspected was a software defect report** (websocket warnings, order-recovery bugs, OOM crashes, hyperopt behaviour). There is **no community practice of posting P&L in issues**. This is not a null result about profitability; it is a null result about *where the evidence would be*.
 
-**(c) An important limitation on this section, stated up front.** A dedicated sub-investigation into Freqtrade community case studies (r/freqtrade_io, r/algotrading, Freqtrade Discord, strategy-repo live-trading disclosures) was **run and then stopped without completing**, because every avenue it needed was blocked from this environment (see §5 rows 2–4). **Consequently, community self-reports were not examined at all in this report.** The cases in §1.2–§1.7 are the ones I verified directly, by fetching raw GitHub content and enumerating repositories via the GitHub API. **§1 should be read as "what is verifiable from indexed, fetchable sources," not as "the complete public record."** This distinction is itself part of the finding: the venues where small-account results are actually posted are precisely the ones that cannot be independently checked.
+**(c) A limitation on this section, and how it was partly resolved.** A dedicated sub-investigation into Freqtrade community case studies was run and initially **failed**, because reddit.com, old.reddit.com, the Reddit JSON API, every Redlib mirror, DuckDuckGo Lite, Brave, Bing, and all SearxNG instances were blocked or captcha-walled from this environment (see §5 row 18). A **second pass succeeded** by switching to the **Arctic Shift Reddit archive API**, which returned full post text for the community cases now documented in **§1.8**. The cases in §1.2–§1.7 were verified directly from raw GitHub content and the GitHub API; §1.8 was verified from archived Reddit post bodies.
+
+**What remains unexamined, and it is not trivial:** Reddit **comment threads** (replies, rebuttals, and follow-ups — where a claimed result would most likely be challenged) were not retrieved; the archive is incomplete; and the **Freqtrade Discord**, where the project explicitly directs its users and where most live small-account discussion actually happens, is **not archivable and was not accessed at all**. **§1 should therefore be read as "what is verifiable from indexed, fetchable sources," not as "the complete public record."** That distinction is itself part of the finding: the venues where small-account results are actually posted are largely the ones that cannot be independently checked.
 
 ### 1.2 The best-documented failure with a small-account frame: a $2,000 post-mortem (BACKTEST, not live)
 
@@ -191,7 +196,93 @@ Backtest period 2018-03-01 → 2020-03-01, 1h, 8 pairs. **[CLAIM]** — but note
 
 **Note the period: 2018-03 → 2020-03 includes the 2019 rally.** A strategy collection whose entire published evidence is one 24-month window that happens to contain a large bull move, and which is now ~5 years stale against a framework that has since changed its config schema and interface version, is not evidence about 2026 crypto.
 
-### 1.8 Failures are under-reported — the asymmetry, stated explicitly
+### 1.8 Community-reported small-account live cases — finally, real accounts with numbers
+
+§1.2–§1.7 are the cases reachable through indexed, fetchable sources. A second pass recovered the actual **community** cases — small-account live reports posted to Reddit — by using the **Arctic Shift Reddit archive API** (`https://arctic-shift.photon-reddit.com/api/posts/ids?ids=<id>`), which works from this environment where reddit.com, old.reddit.com, the Reddit JSON API, and every Redlib mirror were blocked. **I retrieved and read the full text of each post below myself.** Post IDs and subreddits are given so the text can be re-pulled from the same archive.
+
+**Every single one of these is self-reported. Not one is API-verified or audited.** They are, however, the closest thing to the "documented small-account case study" this research set out to find — and they are worth reading precisely because they show what the real distribution of outcomes looks like.
+
+**(a) The best-documented case: a 2,729-trade live crypto post-mortem** — r/algotrading, post `1tyc4nb`, author `piratastuertos`, score 18. **[PRACTITIONER — self-reported]** — `https://reddit.com/r/algotrading/comments/1tyc4nb/`
+
+> "I ran an evolutionary system live for 60 days (2,729 trades). Backtest target was PF 1.3, live came back 1.15 — post-mortem."
+> "Profit factor: target ≥1.3 → live **1.15** / Win rate: target ≥45% → live **33.6%** / Max losing streak: target ≤5 → **18** / Internal coherence: ≥0.65 → 1.79 (the one thing that held)"
+> "**The system didn't lose money. It just never earned the right to scale. Verdict: weak edge. I didn't scale it.**"
+
+**This is the single most valuable real-world case in the report**, because **2,729 trades** is a genuinely large sample — comfortably above the ~200–1,000 threshold I derive in §2.2 — so this is one of the very few retail cases where a conclusion is statistically licensed at all. And the outcome is neither triumph nor disaster: **a real but weak edge that missed every target except one.** Account size is **not disclosed**, which is a real limitation.
+
+The author's two post-mortem findings are independently interesting and match the literature:
+
+> "**No live learning.** The agents evolved on backtest scores — they optimized for a fixed history. When the regime shifted, they kept trading a world that no longer existed. **Nothing in a backtest punishes a strategy for failing to adapt, because the past doesn't change.**"
+> "**Hidden concentration.** I'd built anti-monoculture pressure by strategy type, but not by symbol. End result: at points, **100% of live positions sat in one coin (ADA), and I never decided that.** The backtest aggregated PnL and never flagged it."
+> "The expensive lesson wasn't the 1.15. It was **almost trusting the backtest enough to scale.**"
+
+**(b) The clearest example of the "few trades" trap in the wild** — r/algotrading, post `1tdeu7b`, author `ComradeZuvarna`, **score 112**. **[PRACTITIONER — self-reported, PAPER trading]** — `https://reddit.com/r/algotrading/comments/1tdeu7b/`
+
+A multi-asset bot ("Nexus"): 6 strategies, ~45 symbols, half-Kelly sizing, HMM regime detection, running **4 weeks in paper mode on a $1,000 simulated bankroll, ~480 resolved trades, "up about $25."** The author then asks the exact question this report exists to answer:
+
+> "**Is 480 paper trades enough to have any confidence in going live, or am I kidding myself?**"
+> "I'm planning to start with **~$500–$1,000 real capital**. Obvious question: **is that too small to be meaningful given commissions/slippage** on the equity side?"
+
+**[REASONING] The answer to his first question is no, and the arithmetic shows it.** +$25 over 480 trades is **$0.052 per trade** on a $1,000 bankroll — a per-trade return of **0.0052%**. From §2.2, significance at 480 trades requires mean/SD > 1.96/√480 = **0.089**. With realistic crypto per-trade volatility (SD of roughly 1–2%), his mean/SD is on the order of **0.003–0.005** — roughly **20× too small** to be distinguishable from luck. **480 trades sounds like a lot; it is nowhere near enough when the per-trade edge is this thin.** The intuition that "more trades = more confidence" is right in direction and wrong by an order of magnitude in magnitude.
+
+Note also: this was **paper trading**, and the author's own stated constraint — "max of $30 per trade as a limit" on a $1,000 bankroll — is exactly the position-sizing friction §4 discusses.
+
+**(c) A four-way LLM-agent live comparison — and a cautionary tale about the record** — r/CryptoCurrency, post `1osld1l`, author `-Baloo`. **[PRACTITIONER — self-reported]** — `https://reddit.com/r/CryptoCurrency/comments/1osld1l/`
+
+Four LLM agents each trading BTC (~$1,000 implied by the percentages):
+
+| Agent | Realised P&L | Trades | Win rate |
+|---|---|---|---|
+| Gemini | **−$308.53 (−30.85%)** | 118 | 30.5% |
+| Claude | **−$83.27 (−8.33%)** | 36 | 22.2% |
+| GPT | **+$127.50 (+12.75%)** | 40 | 42.5% |
+| Grok | **+$90.90 (+9.09%)** | 36 | **19.4%** |
+
+Two of four lost money. Note the trap in the two "winners": Grok's **+9.09% came off a 19.4% win rate** (7 wins / 29 losses) over just **36 trades** — a result driven entirely by a small number of outsized winners, which is precisely the configuration §2.2 says cannot be distinguished from luck at N=36. **Do not read any of these four rows as evidence of skill or its absence; at 36–118 trades, none of them is statistically meaningful.**
+
+⚠️ **And a finding about the record itself:** when I pulled this post from the archive, its metadata showed `removal_type: "deleted"`, `was_deleted_later: true`, `edited_title: "[ Removed by moderator ]"`. **This "documented case" no longer exists on Reddit.** It survives only because a third-party archive happened to capture it. This is a concrete illustration of §1.9's point: even the cases that do get written up are fragile and unpreserved.
+
+**(d) A small live account with honest caveats** — r/CryptoMarkets, post `1rxyb7j`, author `Theredeemer08`, score 2. **[PRACTITIONER — self-reported]** — `https://reddit.com/r/CryptoMarkets/comments/1rxyb7j/`
+
+> "I am running the strategy live with a small account (**~$400 capital**). Risk **10% per trade** / PnL: **~23%** / **~43 trades** taken / Win rate: **~56%** / Avg hold: ~8 hours"
+
+The author's own qualifications are more honest than most published material:
+
+> "**Bitcoin has been pumping up to ~$74k in the last week which also affects results**"
+> "Overall, this is inline with my expectations to extents - that **in live testing we would capture a fraction of the backtest returns.**"
+
+**[REASONING] At ~43 trades and ~1 week, this is statistically meaningless** (43 trades needs mean/SD > 0.30 for p<0.05), and the author says so implicitly by attributing the result to a BTC rally. Note also **10% risk per trade on a $400 account** — a single bad streak is account-threatening. The same author separately posted a **backtest** of 1,160 trades / +421%; that is a backtest, not a live result, and should not be paired with the live number as if they were comparable.
+
+**(e) Unverifiable bravado — the genre to discount** — r/algotrading, post `1nyggbu`, author `pixelking385`, score 0. **[CLAIM]** — `https://reddit.com/r/algotrading/comments/1nyggbu/`
+
+> "So I lost $200. I was sad. Then I had an idea, let's take $20, buy ChatGPT plus and have it do it for me... I have a working bot, it **averages about 6% daily return on investment.**"
+
+No trade count, no period, no verification. **[REASONING]** 6% daily compounded is ≈2,200× per year — a claim that requires no analysis to dismiss. It is included because it is *typical* of the self-reported small-account genre, and because its score of **0** versus the Nexus post's **112** is a useful signal: **the community itself downvotes this kind of claim and upvotes the honest post-mortem.** That is a genuinely encouraging datum about where credibility sits.
+
+**(f) The aggregate audit that these individual cases cannot provide.** Individual Reddit cases are anecdotes. The one large-N artifact that measures the population is the **895-strategy out-of-sample audit** in **§3.2** — which found that **2 of 895** public strategies survive every check and **0 beat buy-and-hold**. §1.8(a)–(e) should be read as colour on *how* retail results are reported; §3.2 is the only thing here that estimates a *rate*.
+
+**(g) The one case in this report whose raw artifacts ARE published — and it is a refutation of a marketed strategy.** `https://github.com/farzinb502-jpg/freqtrade/pull/1` **[VERIFIED-URL]** — PR #1, open, created 2026-09-15, author `farzinb502-jpg`. I verified the PR body and **all 69 changed files** via the GitHub API.
+
+**Why this one matters:** §1.2's post-mortem *claimed* "receipts" that I proved absent. This PR is the opposite — it publishes `artifacts/REPORT.md` (239 lines), `artifacts/TRENDRIDER_COMPARE.md` (170 lines), `artifacts/comparison_table.csv`, the **raw freqtrade backtest result `.zip` files**, and **full per-pair backtest logs** (13 log files, ~9,000 lines). **Anyone can re-run it.** It is the only case in this report where that is true.
+
+It also **self-discloses that it was AI-written** ("This PR was written with Cursor Grok (AI)"), and its conclusion is a refusal to deploy:
+
+> "**Honest backtest result:** the framework works. Over 91 days of 15m candles, three of the original four strategies lost money after 0.10% fees. The official `SampleStrategy` made **+12%** on the combined book and still **lagged buy-and-hold** (BTC +17%, ETH +43%, SOL +39%). SOL lost for every original strategy. **Do not go live.**"
+
+It then tests **TrendRider** — an MIT-licensed strategy it found via an "awesome list":
+
+| Book | SampleStrategy | TrendRiderStrategy |
+|---|---|---|
+| 15m combined | 61 trades, **93.4% WR**, +11.97%, PF 2.52, DD 3.26% | 395 trades, 22.8% WR, **−21.77%**, PF **0.64**, DD 23.44% |
+| 1h combined | 24 trades, **100% WR**, +8.22% | 133 trades, 18.0% WR, **−12.64%**, PF **0.43** |
+
+> "**Awesome-list marketing is not evidence.**" … "Neither is a live edge." … "`-s TrendRiderStrategy` remains available for research only."
+
+**[REASONING] Three lessons, all consistent with §2.** (i) A strategy surfaced by an "awesome list" **lost 21.77%** where the engine's own sample strategy gained — the marketing channel carries no information. (ii) The `SampleStrategy` result looks spectacular (93.4% win rate, PF 2.52) and **still lost to buy-and-hold**, reproducing §3.2's central finding in miniature. (iii) The 1h row — **24 trades at 100% win rate, +8.22%** — is a textbook §2.2 trap: a 100% win rate over 24 trades is *not* evidence of anything, and 24 trades cannot reach significance at any realistic per-trade edge. **A perfect win rate on a tiny sample is the single most misleading artifact in retail backtesting.**
+
+**[REASONING] What the community sample shows, taken together.** Six cases: one weak-but-real edge over 2,729 trades that still missed every target (a); one paper-traded +2.5% that is ~20× short of significance (b); four LLM agents of which two lost and whose winners are statistically meaningless (c); one week-long +23% on $400 driven by a BTC rally (d); one 6%-daily fantasy (e); and one fully-reproducible backtest that refuted a marketed strategy and declined to deploy (g). **Not one is independently verified, and not one is a sustained, documented small-account success.** Note the pattern across all six: **the outcomes cluster around "roughly break-even to weak," and the failures come from over-trading, over-sizing, and mistaking a small sample for an edge** — not from exotic strategy failure. That is the honest answer to the question this report set out to research.
+
+### 1.9 Failures are under-reported — the asymmetry, stated explicitly
 
 **[REASONING, grounded in the verified observations above.]** The asymmetry is not merely suspected; it is visible in the structures I verified:
 
@@ -634,6 +725,9 @@ Its "Key Stats" box asserts five numbers, **none with any citation**:
 3. **Small accounts hit structural frictions that backtests do not model.** Freqtrade documents exchange minimum order sizes that can exceed $50, and the lookahead-analysis tool itself validates at a 1-billion wallet with 10,000 stakes. Position-size granularity, minimum-notional limits, and the resulting inability to size positions precisely are *specific* to small accounts and are **not** in the backtest.
 4. **The capital ceiling is arithmetic, not strategy.** Even granting the unsourced 30% APY figure from §1.2, $2,000 × 30% = $600/year ≈ $50/month. **This is the strongest single argument in the report**, precisely because it requires no strategy assumption at all beyond a generous upper bound: at $1,000–$2,000, the *maximum plausible* outcome is a hobby-scale sum, while the downside is total loss plus the cost of the VPS, the subscription, and the time.
 5. **The disclosure you would need to evaluate any claim is essentially never published.** No source I found reported its trial count, its PBO, or its MinTRL — the three quantities the peer-reviewed literature says are required (§2.6). Any claim that omits them is, in the DSR authors' words, "worthless, regardless of how excellent the reported performance might be."
+6. **A statistically perfect edge is still not a reason to run a bot — because the benchmark is holding the coins.** §3.2's `CombinedBinHClucAndMADV5` is the cleanest evidence in this report: **1,295 out-of-sample trades, +0.46% per trade, p = 8.4 × 10⁻¹⁵, positive 95% CI** — it passes every test §2 can construct — and it returned **+106.9% against buy-and-hold's +346.3%**. For a small account the operational question is therefore not "does my bot have an edge?" but "**does my bot beat doing nothing?**" and on the only large-N evidence available, the honest answer for public strategies is **no (0 of 456)**.
+7. **The realistic failure modes are mundane, and therefore avoidable.** Across the six community cases in §1.8 the causes were: over-trading a thin edge, risking 10% per trade on a $400 account, symbol concentration (100% in ADA, undiscovered by the backtest), and mistaking a 24–480-trade sample for proof. **None of these is an exotic strategy failure**, and each is a sizing and process error — which is where a small-account operator should actually spend attention.
+8. **If you proceed anyway, the defensible protocol is narrow.** Pre-register the strategy and its parameters *before* looking at out-of-sample data (the `strategy-audit` author's own `PREREGISTRATION.md` is a usable template); count and disclose your trial count; require **t > 3.0** rather than 2.0 (§2.5); require the per-trade **mean/SD** implied by your target trade count (§2.2) rather than a headline return; and **benchmark against buy-and-hold on the same pairs over the same window** — the one comparison §3.2 shows almost nothing survives.
 
 ---
 
@@ -644,9 +738,12 @@ Explicitly listed so these gaps are not mistaken for findings.
 | # | Item | Why it could not be verified |
 |---|---|---|
 | 1 | **Any independently verified (API/audited) small-account crypto track record** | None found in any search. This is the report's central negative finding. |
-| 2 | **Reddit content** (r/algotrading, r/freqtrade_io, r/CryptoCurrency) | `old.reddit.com` returns a "Welcome to Reddit" block page; the Reddit JSON API returns non-JSON; `web_fetch` on `reddit.com` returns an empty JS shell. **Reddit was inaccessible from this environment**, so community self-reports could not be examined at all. |
-| 3 | **Freqtrade Discord** | Not publicly indexed or archivable by design. Confirmed the project points users there (`docs/faq.md`), and that `github.com/freqtrade/freqtrade/discussions` is HTTP 404. |
+| 2 | **Reddit content — PARTIALLY RESOLVED.** r/algotrading, r/CryptoCurrency, r/CryptoMarkets posts **were** recovered (§1.8) | `old.reddit.com` returns a "Welcome to Reddit" block page; the Reddit JSON API returns non-JSON; `web_fetch` on `reddit.com` returns an empty JS shell; all Redlib mirrors served captchas/429. **Resolved via the Arctic Shift archive API** (`arctic-shift.photon-reddit.com/api/posts/ids`), which returned full post text. **Remaining gap:** archive coverage is incomplete, comment threads were not retrieved (so replies, rebuttals, and follow-ups are unexamined), and r/freqtrade_io returned only 1 post for "live results" and 0 for "6 months live" — **it is effectively a dead venue.** |
+| 3 | **Freqtrade Discord** | Not publicly indexed or archivable by design. Confirmed the project points users there (`docs/faq.md`), and that `github.com/freqtrade/freqtrade/discussions` is HTTP 404. **This is where the community's real live-trading discussion lives, and it is the single largest unreachable evidence source in this report.** |
 | 4 | **Freqtrade GitHub Discussions** | HTTP 404 — the venue does not exist. |
+| 4b | **The intermediate funnel counts in `Apex-prim/strategy-audit`** (§3.2) | I verified the **endpoints** directly from `LEDGER.csv` (895 rows; 2 survivors at `E6`; 0 beating buy-and-hold; the exact +106.91% / +346.34% / +0.46% figures). I **could not reproduce the intermediate ladder** (their 496/158/83 vs my 533/192/106) without `verify_ledger.py` and its gate thresholds. |
+| 4c | **Independent replication of `Apex-prim/strategy-audit`** | None exists. 3 stars, 0 forks, created 2026-08-20. The author labels this corpus's own verdict "**repair-adjusted**", not pre-registered. |
+| 4d | **The "66 survive / 4 beat the market" figure in that project's prose** | Contradicts its own ledger block (17 / 3) and my CSV computation (15 / 3). The "3" agrees; the survivor counts do not. Treat as stale — see §3.2. |
 | 5 | **Any crypto-specific study of trading-bot or strategy survival** | **Does not appear to exist.** Searches returned only vendor blogs plus one tangential peer-reviewed paper (chart patterns in the Mt.Gox era) that contains no profitability base rate. The crypto-specific base rate is genuinely unestablished in the literature. |
 | 6 | **"Fraction of backtested strategies that survive live trading" as a single number** | **No peer-reviewed source states it.** The best dataset (888 strategies) reports R² ≈ 0.02, not a survival fraction. |
 | 7 | **"87% of backtested strategies fail"** (`sigmentic.com`) | **No source given; the number is not present in either study the page cites** (both read in full by me). [FOLKLORE] |
@@ -660,7 +757,9 @@ Explicitly listed so these gaps are not mistaken for findings.
 | 15 | **`OfficialGIGA` and `Bananajoexxc` figures** | Self-reported; no starting balance stated for the former; the latter's Calmar ratio is internally impossible (§1.6). |
 | 16 | **Wiecki et al. — the fraction of the 888 strategies that lost money** | **Not reported in the paper**; I grepped the full text. Only aggregate R² and top-10 portfolio results are given. Do not let anyone attribute a failure percentage to this study. |
 | 17 | **FCA "≈80% of CFD customers lose money"** | Cited secondhand only; I did not fetch the FCA handbook page. [CLAIM — not cited] |
-| 18 | **Search-engine access generally** | `web_search` returned "No results found" for most queries; DuckDuckGo Lite served a bot challenge mid-session; Brave Search returned HTTP 429 persistently; Bing returned query-irrelevant results; SearxNG instances sat behind anti-bot pages; Semantic Scholar API returned 429. Discovery relied on early DDG Lite results, direct URL construction, the GitHub API, and raw-file fetches. |
+| 18 | **Search-engine access generally** | `web_search` returned "No results found" for most queries; DuckDuckGo Lite served a bot challenge mid-session; Brave Search returned HTTP 429 persistently; Bing returned query-irrelevant results (ignoring query terms entirely); SearxNG instances sat behind anti-bot pages; Semantic Scholar API returned 429; Redlib mirrors captcha'd. **What did work, and carried most of this report: direct URL construction, `raw.githubusercontent.com`, the GitHub REST API (`api.github.com`), `curl` + `pypdf` for PDFs, and the Arctic Shift Reddit archive API.** |
+| 19 | **Reddit comment threads** | The Arctic Shift `posts/ids` endpoint returns post bodies, not comment trees. **Replies and rebuttals to the §1.8 cases were not retrieved** — which matters, because a community challenge is exactly where an inflated self-report would be caught. |
+| 20 | **`r/freqtrade_io` as a source** | Effectively dead: query "live results" → **1 post**; "freqtrade results" → **0**; "6 months live" → **0**. The Freqtrade community's live-trading discussion has moved to Discord (§5 row 3), which is unarchivable. |
 
 ---
 
@@ -699,9 +798,17 @@ Explicitly listed so these gaps are not mistaken for findings.
 | CFTC, *Must Know Forex* customer advisory | `https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/CustomerAdvisory_MustKnowForex.html` | **[VERIFIED-URL]** — regulator, primary |
 | Sigmentic, "Why 87% of Backtested Strategies Fail" | `https://www.sigmentic.com/blog/why-backtested-strategies-fail` | **[VERIFIED-URL]** — **[BLOG]; 87% has NO source; vendor funnel** |
 | Intraday Lab, "Why 90% of Trading Bots Fail" | `https://intradaylab.com/blog/why-trading-bots-fail-backtest-mistakes` | **[VERIFIED-URL]** — **[BLOG]; 90% never sourced; five uncited stats** |
+| **`Apex-prim/strategy-audit`** — 895-strategy OOS audit (§3.2) | `https://github.com/Apex-prim/strategy-audit` · README: `https://raw.githubusercontent.com/Apex-prim/strategy-audit/main/README.md` · **data: `https://raw.githubusercontent.com/Apex-prim/strategy-audit/main/LEDGER.csv`** | **[VERIFIED-URL] — I downloaded LEDGER.csv (233,709 bytes) and recomputed the endpoints myself.** 3★/0 forks, MIT, created 2026-08-20; self-published, **unreplicated** |
+| **Arctic Shift Reddit archive API** (§1.8) | `https://arctic-shift.photon-reddit.com/api/posts/ids?ids=<post_id>` | **[VERIFIED-URL]** — returned full post bodies where reddit.com, old.reddit.com, the JSON API, and all Redlib mirrors were blocked |
+| r/algotrading `1tyc4nb` — 2,729-trade live post-mortem (§1.8a) | `https://reddit.com/r/algotrading/comments/1tyc4nb/` | **[PRACTITIONER] — self-reported; account size undisclosed** |
+| r/algotrading `1tdeu7b` — "Nexus", $1,000 / 480 paper trades (§1.8b) | `https://reddit.com/r/algotrading/comments/1tdeu7b/` | **[PRACTITIONER] — self-reported; PAPER trading** |
+| r/CryptoCurrency `1osld1l` — four LLM agents (§1.8c) | `https://reddit.com/r/CryptoCurrency/comments/1osld1l/` | **[PRACTITIONER] — self-reported; post later `deleted`/moderator-removed** |
+| r/CryptoMarkets `1rxyb7j` — $400 live, ~43 trades (§1.8d) | `https://reddit.com/r/CryptoMarkets/comments/1rxyb7j/` | **[PRACTITIONER] — self-reported; ~1 week** |
+| r/algotrading `1nyggbu` — "$200, 6% daily" (§1.8e) | `https://reddit.com/r/algotrading/comments/1nyggbu/` | **[CLAIM] — no trade count, no period; included as genre example** |
+| `farzinb502-jpg/freqtrade` PR #1 — reproducible backtest (§1.8g) | `https://github.com/farzinb502-jpg/freqtrade/pull/1` · `artifacts/REPORT.md` · `artifacts/TRENDRIDER_COMPARE.md` | **[VERIFIED-URL]** — PR body + **all 69 changed files** verified via GitHub API; **raw backtest zips and logs published**; self-disclosed AI-written |
 
 ---
 
 ## 7. Three-sentence summary
 
-**Verified:** the statistical machinery for judging a backtest is real, quantitative, and damning — a random-walk backtest can show Sharpe 1.27 with a sub-1% significance level while having a **55% probability of being overfit**; an annualized Sharpe of 2 needs **2.73 years** of daily data to beat 1.0 at 95%; **30 trades requires a per-trade mean/SD of 0.36–0.55** to be distinguishable from luck, which no realistic crypto strategy achieves; and in the largest study of real deployed strategies (**888** algorithms), in-sample Sharpe explained **R² ≈ 0.02** of out-of-sample Sharpe. **Verified:** the public real-world record for $1,000–$2,000 accounts contains **no independently verified track record at all** — the best-documented case is a seven-strategy, all-negative backtest post-mortem whose claimed "receipts" I confirmed are absent from its repository, the most-adopted strategy repos publish **nine affiliate links and no performance data**, and the two most-cited failure rates (**"87%"**, **"90%"**) have **no traceable source** in the studies they cite. **Conclusion:** at $1,000–$2,000 the binding constraint is not strategy quality but arithmetic and statistics — a generous 30% APY on $2,000 is ~$50/month, the backtest cannot tell you whether the strategy works (R² ≈ 0.02), and the evidence needed to know would take hundreds of trades and years of live running to accumulate.
+**Verified:** the statistical machinery for judging a backtest is real, quantitative, and damning — a random-walk backtest can show Sharpe 1.27 with a sub-1% significance level while having a **55% probability of being overfit**; an annualized Sharpe of 2 needs **2.73 years** of daily data to beat 1.0 at 95%; **30 trades requires a per-trade mean/SD of 0.36–0.55** to be distinguishable from luck, which no realistic crypto strategy achieves; and in the largest study of real deployed strategies (**888** algorithms), in-sample Sharpe explained **R² ≈ 0.02** of out-of-sample Sharpe. **Verified:** the public real-world record for $1,000–$2,000 accounts contains **no independently verified track record at all** — the best-documented case is a seven-strategy, all-negative backtest post-mortem whose claimed "receipts" I confirmed are absent from its repository; the largest out-of-sample audit of public strategies shows **2 of 895 survive and 0 beat buy-and-hold**, which I recomputed from its raw ledger; and the two most-cited failure rates (**"87%"**, **"90%"**) have **no traceable source** in the studies they cite. **Conclusion:** at $1,000–$2,000 the binding constraint is not strategy quality but arithmetic and statistics — a generous 30% APY on $2,000 is ~$50/month, a strategy with a *bulletproof* statistical edge (1,295 trades, p = 8.4 × 10⁻¹⁵) still lost to simply holding the coins by 239 percentage points, and the evidence needed to know whether a given bot works would take hundreds of trades and years of live running to accumulate.
