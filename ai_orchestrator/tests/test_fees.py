@@ -57,6 +57,11 @@ CANADA = REPO / "config" / "canada_kraken.json"
 #: Taker, because the bot's limit orders sit at the touch of the book where they
 #: often fill immediately and are charged as taker.
 KRAKEN_TIER1_TAKER = 0.008
+#: Kraken Tier 1 maker. This is the rate THIS bot pays: entry and exit both use
+#: price_side "same" with order_time_in_force "PO", so the orders rest on the
+#: book. test_order_types.py checks that in 18 places. Only stoploss and
+#: emergency exits are market orders, and they are rare.
+KRAKEN_TIER1_MAKER = 0.0038
 #: ccxt's hardcoded fallback, which was silently in use. Named so a regression to
 #: it is recognisable rather than merely "too low".
 CCXT_DEFAULT_TAKER = 0.0026
@@ -95,10 +100,20 @@ def main() -> int:
     check("fee is present in base.json", True)
 
     print("\nIt is realistic:")
+    # The guard is against UNDER-charging, so it is set at the rate this bot
+    # actually pays rather than the taker rate it almost never pays. Requiring
+    # the taker rate here is what made the fee 0.008, which charged 1.60% a
+    # round trip and made every backtest twice as pessimistic as reality.
     check(
-        "at least Kraken's Tier 1 taker rate (%.2f%%)" % (KRAKEN_TIER1_TAKER * 100),
-        fee >= KRAKEN_TIER1_TAKER,
+        "at least Kraken's Tier 1 maker rate (%.2f%%)" % (KRAKEN_TIER1_MAKER * 100),
+        fee >= KRAKEN_TIER1_MAKER,
         "%.4f is below it — this is the under-charging bug" % fee,
+    )
+    check(
+        "not the full taker rate (%.2f%%) — this bot is post-only" % (KRAKEN_TIER1_TAKER * 100),
+        fee < KRAKEN_TIER1_TAKER,
+        "%.4f charges the taker rate on every leg, which doubles the real cost "
+        "and makes every strategy look unviable" % fee,
     )
     check(
         "not above 1.5%% per side",
@@ -114,7 +129,7 @@ def main() -> int:
     print("\nThe overlay does not undo it:")
     check(
         "canada_kraken.json does not set a lower fee",
-        canada.get("fee") is None or canada.get("fee") >= KRAKEN_TIER1_TAKER,
+        canada.get("fee") is None or canada.get("fee") >= KRAKEN_TIER1_MAKER,
         "overlay fee is %r" % canada.get("fee"),
     )
 
