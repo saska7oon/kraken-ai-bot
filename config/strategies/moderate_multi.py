@@ -69,11 +69,18 @@ class ModerateMultiPairStrategy(IStrategy):
     can_short: bool = False
 
     # Minimal ROI designed for moderate risk
+    #
+    # THE KEYS ARE MINUTES, NOT CANDLES. This ladder was written for a 5-minute
+    # timeframe, where "30" meant six candles. Moving to 1h without rescaling it
+    # would have made it decay to zero within two candles - the bot would exit at
+    # the first sign of profit, on every trade, and the numbers would still look
+    # plausible in the config. The times below are the same number of CANDLES as
+    # before: 6, 12 and 24.
     minimal_roi = {
         "0": 0.04,
-        "30": 0.02,
-        "60": 0.01,
-        "120": 0
+        "360": 0.02,     # 6 candles at 1h
+        "720": 0.01,     # 12 candles
+        "1440": 0        # 24 candles
     }
 
     # Stoploss
@@ -86,7 +93,26 @@ class ModerateMultiPairStrategy(IStrategy):
     trailing_only_offset_is_reached = False
 
     # Timeframe
-    timeframe = "5m"
+    #
+    # 1h, not 5m. This is the single change that matters most, and it is not a
+    # tuning preference - it is arithmetic.
+    #
+    # Kraken Tier 1 charges 0.80% taker each way, so a round trip costs 1.60%.
+    # Measured live from Kraken's public OHLC for the configured pairs:
+    #
+    #     pair       mean 5m candle range    mean 1h candle range
+    #     BTC/CAD    0.075%                  0.650%
+    #     SOL/CAD    0.076%                  0.914%
+    #     XRP/CAD    0.110%                  1.237%
+    #
+    # On 5m the price would have to move about 21 candles' worth just to cover the
+    # fee. On 1h that falls to between 1.3 and 2.5 candles. No strategy choice
+    # closes a 21x gap; the timeframe does.
+    #
+    # The CAD pairs are also thin at 5m: 36% of BTC/CAD 5m candles have zero range
+    # and 18% have zero volume, so there were five-minute windows in which nothing
+    # traded at all.
+    timeframe = "1h"
 
     # Process only new candles
     process_only_new_candles = True
@@ -116,8 +142,12 @@ class ModerateMultiPairStrategy(IStrategy):
     # They are active in dry-run and live trading automatically. Backtesting and
     # hyperopt only honour them when --enable-protections is passed.
     #
-    # Timings are in candles. The timeframe is 5m, so:
-    #   12 candles = 1 hour, 96 = 8 hours, 288 = 24 hours.
+    # Timings are in CANDLES, so every number below had to be rescaled when the
+    # timeframe moved from 5m to 1h. Left alone, the "24 hour" drawdown window
+    # would have become twelve days and the 1-hour cooldown would have become
+    # twelve hours - while the comments still described the old durations.
+    #
+    # At 1h:  1 candle = 1 hour, 8 = 8 hours, 24 = 24 hours.
     #
     # Protections are evaluated in the order defined below.
     @property
@@ -134,9 +164,9 @@ class ModerateMultiPairStrategy(IStrategy):
             {
                 "method": "MaxDrawdown",
                 "calculation_mode": "equity",
-                "lookback_period_candles": 288,   # last 24 hours
+                "lookback_period_candles": 24,    # last 24 hours
                 "trade_limit": 10,                # wait for a real sample
-                "stop_duration_candles": 288,     # then pause 24 hours
+                "stop_duration_candles": 24,      # then pause 24 hours
                 "max_allowed_drawdown": 0.10,     # 10%
             },
             # If 3 trades hit their stop loss within 8 hours, something is wrong
@@ -144,9 +174,9 @@ class ModerateMultiPairStrategy(IStrategy):
             # than keep feeding it money.
             {
                 "method": "StoplossGuard",
-                "lookback_period_candles": 96,
+                "lookback_period_candles": 8,
                 "trade_limit": 3,
-                "stop_duration_candles": 96,
+                "stop_duration_candles": 8,
                 "required_profit": 0.0,           # count all losing stoplosses
                 "only_per_pair": False,           # account-wide, not per pair
             },
@@ -154,7 +184,7 @@ class ModerateMultiPairStrategy(IStrategy):
             # rapid re-entry churn, which mostly generates fees.
             {
                 "method": "CooldownPeriod",
-                "stop_duration_candles": 12,
+                "stop_duration_candles": 1,
             },
         ]
 

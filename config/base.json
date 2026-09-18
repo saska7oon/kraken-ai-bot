@@ -204,7 +204,15 @@
     // -------------------------------------------------------------------------
     // TIMEFRAME
     // -------------------------------------------------------------------------
-    "timeframe": "5m",
+    // 1h, not 5m. See the fee block above and the strategy's `timeframe` for the
+    // arithmetic: Kraken Tier 1 charges 1.60% round trip, the mean BTC/CAD 5m
+    // candle moves 0.075%, and the mean 1h candle moves 0.650%. On 5m the price
+    // must move about 21 candles' worth to cover the fee; on 1h, about 2.5.
+    //
+    // This must match the strategy's own `timeframe`. Freqtrade uses the
+    // strategy's value, so a mismatch here would be silently ignored rather than
+    // erroring - which is why both are set and a test checks they agree.
+    "timeframe": "1h",
     "process_only_new_candles": true,
 
     // -------------------------------------------------------------------------

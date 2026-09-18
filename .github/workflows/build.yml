@@ -154,6 +154,12 @@ jobs:
       - name: Simulated trading is charged the real fee
         run: python3 ai_orchestrator/tests/test_fees.py
 
+      # The timeframe, the ROI ladder (minutes) and the protections (candles)
+      # use three different units. Changing one silently reinterprets the others,
+      # with no error and no log line.
+      - name: The three time units agree
+        run: python3 ai_orchestrator/tests/test_timeframe_units.py
+
       - name: Configuration preflight
         run: python3 tools/preflight_config.py
 
