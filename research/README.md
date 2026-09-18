@@ -11,10 +11,17 @@ repeating it.
 
 | File | Lines | What it is |
 |---|---|---|
+| `fee-ceiling-and-quote-currency.md` | 232 | **Read this first.** The fee-drag formula (`turnover × rate`; account size cancels), the corrected 53.5%/yr figure, proof that no fee-reduction avenue is open, and why USDT is not tradeable in Canada. |
+| `canadian-crypto-tax-usdt-report.md` | 539 | CRA treatment of crypto-to-crypto, business-income vs capital-gains factors, and the finding that **Kraken Canada prohibits USDT entirely**. |
 | `regime-strategies-report.md` | 666 | Strategies organised by market regime, with exact rules. **Scoped to a 5-minute timeframe this bot no longer uses.** |
 | `strategy-count-and-overfitting-sources.md` | 782 | How many configurations a small account can afford to test, with peer-reviewed numbers. |
 | `freqtrade-strategy-repos-report.md` | 574 | Inventory of public Freqtrade strategy repos, verified via the GitHub API. **An inventory, not an evaluation.** |
 | `turtle-risk-model-result.md` | 156 | **A negative result.** Completing the published Turtle system (ATR stop + risk-based sizing) was measured across a full 2×2 and made the strategy worse in every cell. Read this before proposing another strategy change. |
+| `small-account-base-rates.md` | 384 | Base rates: what crypto buy-and-hold and passive benchmarks actually return. |
+| `small-account-strategy-classes.md` | 945 | Strategy families evaluated for a small account. |
+| `small-account-minimums-and-fees.md` | 627 | Minimum viable account sizes and the fee floor. |
+| `small-account-algo-trading.md` | 788 | Peer-reviewed evidence on systematic crypto strategy performance, net of costs. |
+| `small-account-cases-and-backtest-reliability.md` | 643 | Documented retail outcomes, and why a backtest cannot tell you whether a strategy works (in-sample Sharpe explains **R² ≈ 0.02** of out-of-sample). |
 | `gh/` | — | The primary-source evidence the reports cite: upstream READMEs, licences, the NFI trading-modes doc, and file listings. |
 
 Every claim in the reports carries an evidence label — `[VERIFIED-URL]`,
@@ -63,12 +70,31 @@ and use a held-out `--timerange` that has never been optimised on.
 At Kraken Tier 1 a round trip costs ~0.80%. On 5-minute candles the average
 BTC/CAD candle's entire range is 0.118% — the fee is 13.6 candles of total
 range, so no 5m strategy survives. On daily candles the arithmetic is just as
-blunt: one trade per day would cost roughly **97% of the wallet per year** in
+blunt: one trade per day would cost roughly **53.5% of the wallet per year** in
 fees and would need 64–75% directional accuracy just to break even.
+
+> **Correction (2026-09-18):** this figure was previously stated as **97%/yr**,
+> which held the fee tier fixed at Tier 1. Daily trading on a $1,500 account
+> reaches **Tier 3** (0.22% maker), which almost halves the cost. The corrected
+> figure is **~53.5%/yr**. The conclusion is unchanged; the number was wrong.
+> See `fee-ceiling-and-quote-currency.md` §1.
 
 The consequence: **looking for a better signal will not produce more trades.**
 No strategy choice fixes a 0.80% taker fee. The levers that actually matter are
 the fee tier, the number of trades taken, and order type (post-only maker).
+
+**And the fee tier is a closed door.** Since July 2026 tiers are the best of
+volume *or* assets held, but Tiers 1–2 have **no assets route at all** and the
+first threshold is $20,000 USD — 14–28× this account. Kraken+ (zero fees to
+$10k/mo) **explicitly excludes API trading**. Every frequency increase buys a
+smaller rate cut than the volume it demands. Full analysis in
+`fee-ceiling-and-quote-currency.md`.
+
+**The fee drag formula, which reframes the whole question:**
+`annual fee % = round trips/yr × (2/k) × maker_rate`. **Account size cancels
+out.** A $1,000 account and a $1,000,000 account trading monthly both pay
+3.20%/yr — so "is there a strategy for a small account?" has no distinct
+answer. The constraint is turnover, not capital.
 
 ---
 
@@ -90,6 +116,17 @@ the fee tier, the number of trades taken, and order type (post-only maker).
   result is `has_bias: No`, 15 signals, 0 biased.
 - **`recursive-analysis` has not been run** (startup-candle sufficiency). It is
   the remaining official check recommended by the reports.
+- **A trap: "does Kraken list the market?" is the wrong question.** Kraken's
+  public `AssetPairs` endpoint lists `USDT/CAD`, but **Canadian clients cannot
+  deposit, hold or trade USDT at all** — it was suspended 30 Nov 2023 and
+  residual balances were force-converted to USD. The question that matters is
+  *"can a Canadian client trade it?"*. DAI, PYUSD, RLUSD, WBTC, WETH, XAUT,
+  PAXG and XMR are prohibited too; **USDC and USD are not**.
+- **Single-snapshot spreads are not evidence.** Measured 20 seconds apart,
+  BTC/CAD's top-of-book spread moved **3.7×** and SOL/CAD's **3×**. Thin books
+  do not hold a top level. USD spreads did not move at all, which is the depth
+  signal. Any spread comparison in this archive that rests on one sample should
+  be discarded — trade counts are the robust measure.
 
 ## What is deliberately not committed here
 
