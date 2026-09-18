@@ -1071,14 +1071,100 @@ async function send(text) {
    Controls
    ========================================================================== */
 
+/*
+  Render what a plugin actually produced.
+
+  The control endpoint returns {"status": "completed", "result": <the whole
+  analysis>}, and runPlugin below used to discard that value and say "finished.
+  Check the summary above." - pointing at the digest panel, which is about the
+  BOT and is generated on its own daily schedule. The market analysis was
+  computed, returned in full, and thrown away; the operator was sent to look at
+  something else. Same defect as the chat renderer, one layer over.
+
+  Shapes come from the plugins themselves, so this reads them defensively: a
+  missing key must not blank the whole panel.
+*/
+function renderPluginResult(bubble, name, result) {
+  if (!result || typeof result !== "object") return false;
+  const box = el("div", "rows");
+  let any = false;
+
+  const addRow = (label, value, cls) => {
+    const row = el("div", "row");
+    row.appendChild(el("span", "k", label));
+    row.appendChild(el("span", "v " + (cls || ""), String(value)));
+    box.appendChild(row);
+    any = true;
+  };
+
+  // market_analyst
+  const regime = result.regime;
+  if (regime && typeof regime === "object" && regime.regime) {
+    const conf = Number(regime.confidence);
+    const label = String(regime.regime).replace(/_/g, " ");
+    addRow("Market regime",
+      label + (isNaN(conf) ? "" : " (" + Math.round(conf * 100) + "% confidence)"),
+      /up|bull/.test(regime.regime) ? "up"
+        : /down|bear/.test(regime.regime) ? "down" : "");
+    if (regime.description) addRow("Reading", regime.description);
+  }
+
+  const pairAnalysis = result.pair_analysis;
+  if (pairAnalysis && typeof pairAnalysis === "object") {
+    Object.keys(pairAnalysis).forEach(pair => {
+      const a = pairAnalysis[pair];
+      if (!a || typeof a !== "object") return;
+      if (a.error) { addRow(pair, "failed: " + a.error, "down"); return; }
+      const bits = [];
+      if (a.trend) bits.push(String(a.trend).replace(/_/g, " "));
+      if (a.rsi !== undefined) bits.push("RSI " + Number(a.rsi).toFixed(0));
+      if (a.price !== undefined) bits.push(money(a.price));
+      if (!bits.length) return;
+      addRow(pair, bits.join("  \u00b7  "),
+        /bull/.test(a.trend || "") ? "up" : /bear/.test(a.trend || "") ? "down" : "");
+    });
+  }
+
+  // Alerts are the part meant to change what the operator does, so they are
+  // shown even when everything else is quiet.
+  if (Array.isArray(result.alerts) && result.alerts.length) {
+    result.alerts.forEach(a => {
+      if (!a || typeof a !== "object") return;
+      const msg = a.message || a.type || "alert";
+      addRow("Alert", msg + (a.action ? " \u2014 " + a.action : ""),
+        a.severity === "warning" ? "down" : "");
+    });
+  }
+
+  // Other plugins report less structure; show a count rather than nothing.
+  if (!any) {
+    if (Array.isArray(result.suggestions)) addRow("Suggestions", result.suggestions.length);
+    else if (result.pairs_analyzed !== undefined) addRow("Pairs analysed", result.pairs_analyzed);
+  }
+
+  if (any) {
+    bubble.appendChild(box);
+    // Say which run this was. The market panel is refreshed by its own schedule
+    // too, so an unlabelled block would be ambiguous about when it was measured.
+    bubble.appendChild(el("div", "digest-src",
+      "Measured just now by " + (PLUGIN_LABELS[name] || name) + "."));
+  }
+  return any;
+}
+
 async function runPlugin(name, label, btn) {
   if (btn) btn.disabled = true;
   addMsg("Running " + label + "\u2026", "msg-sys");
   try {
-    await api("/api/v1/plugins/" + encodeURIComponent(name) + "/control",
+    // Keep the response: it carries the entire analysis, and discarding it here
+    // is exactly what made "Market check" appear to do nothing.
+    const r = await api("/api/v1/plugins/" + encodeURIComponent(name) + "/control",
       { method: "POST", body: { action: "run" } });
+    const bubble = addMsg(label + " finished.", "msg-sys");
+    if (!renderPluginResult(bubble, name, r && r.result)) {
+      addMsg(label + " produced no output to show.", "msg-sys");
+    }
     toast(label + " finished.", "ok");
-    addMsg(label + " finished. Check the summary above.", "msg-sys");
     await Promise.all([loadDigest(true), loadApprovals()]);
   } catch (e) {
     if (e.auth) return signOut(e.message);

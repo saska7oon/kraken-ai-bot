@@ -300,6 +300,35 @@ _NOT_RESPONSE_FIELDS = {
 }
 
 
+def _resolve_concat_path(script: str, path: str) -> str:
+    """Expand a leading literal into the full concatenated path, if it is one.
+
+    The path may be assembled:
+
+        const r = await api("/api/v1/plugins/" + encodeURIComponent(name) + "/control",
+                            { method: "POST", body: { action: "run" } });
+
+    Taking only the leading literal binds this response to /api/v1/plugins - the
+    LIST route, which exists and returns the plugin listing. Fields are then
+    validated against the wrong handler and every read looks like a typo.
+    _paths_called_by_ui already assembles these and its docstring records the
+    trap; this did not, so the same bug survived in the one place that checks
+    field names.
+
+    The assembled path keeps a "*" placeholder, which _endpoint_ok matches
+    against a parameterised route - so a dynamic endpoint is verified as
+    "exists", not as a statically known shape. That is right for a route whose
+    response cannot be read off the source.
+    """
+    concat = re.compile(
+        r"""["'](/api/[^"'`\s]*)["']\s*(?:\+\s*[^"';]+\+\s*["']([^"']*)["']\s*)+"""
+    )
+    for cm in concat.finditer(script):
+        if cm.group(1) == path:
+            return cm.group(1) + "*" + "".join(cm.groups()[1:])
+    return path
+
+
 def _ui_field_bindings(script: str) -> List[Tuple[str, str, int, str]]:
     """(variable, api_path, line, method) for each response bound to a route.
 
@@ -315,7 +344,8 @@ def _ui_field_bindings(script: str) -> List[Tuple[str, str, int, str]]:
     )
     for m in pattern.finditer(script):
         method = "POST" if "POST" in m.group(3).upper() else "GET"
-        out.append((m.group(1), m.group(2), script[: m.start()].count("\n") + 1, method))
+        out.append((m.group(1), _resolve_concat_path(script, m.group(2)),
+                    script[: m.start()].count("\n") + 1, method))
 
     # A declaration with no initialiser, assigned later inside a try:
     #
@@ -340,7 +370,8 @@ def _ui_field_bindings(script: str) -> List[Tuple[str, str, int, str]]:
             name = m.group(1)
             if name in declared and name not in already:
                 method = "POST" if "POST" in m.group(3).upper() else "GET"
-                out.append((name, m.group(2), script[: m.start()].count("\n") + 1, method))
+                out.append((name, _resolve_concat_path(script, m.group(2)),
+                            script[: m.start()].count("\n") + 1, method))
                 already.add(name)
     return out
 

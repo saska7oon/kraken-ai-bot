@@ -87,6 +87,7 @@ HARNESS_TEMPLATE = r"""
 const fs = require("fs");
 const src = fs.readFileSync(process.argv[2], "utf8");
 const cases = JSON.parse(process.argv[3]);
+const pluginCases = JSON.parse(process.argv[4]);
 
 function extract(name) {
   const start = src.search(new RegExp("(?:async\\s+)?function\\s+" + name + "\\s*\\("));
@@ -134,6 +135,7 @@ global.loadApprovals = async function () {};
 global.loadStatus = async function () {};
 global.signOut = function () {};
 global.runPlugin = function () {};
+global.loadDigest = async function () {};
 global.PLUGIN_LABELS = {
   market_analyst: "Market analysis",
   param_optimizer: "Parameter optimization",
@@ -143,7 +145,8 @@ let apiResponse = null;
 global.api = async function () { return apiResponse; };
 
 eval(["el", "money", "pct", "addMsg", "addTyping", "renderQueryResults",
-      "renderRefusedPluginActions", "send"].map(extract).join("\n\n"));
+      "renderRefusedPluginActions", "renderPluginResult", "runPlugin", "send"]
+     .map(extract).join("\n\n"));
 
 function allText(n, out) {
   if (!n) return out;
@@ -202,9 +205,45 @@ function buttons(n, out) {
       console.log(`  ok   ${c.name.padEnd(36)} [${text.slice(0, 76)}]`);
     }
   }
+  // -------------------------------------------------------------------------
+  // Plugin runs. Same shape of defect, different entry point, driven the same
+  // way: call the real function and read what lands in the chat log. Run after
+  // the chat cases, not alongside them - both use `nodes` and `apiResponse`,
+  // and interleaving them made results depend on which finished first.
+  // -------------------------------------------------------------------------
+  for (const c of pluginCases) {
+    nodes["chat-log"] = makeEl("div");
+    nodes["send-btn"] = makeEl("button");
+    apiResponse = c.response;
+
+    try {
+      await runPlugin(c.plugin, c.label, null);
+    } catch (e) {
+      console.log(`  FAIL ${c.name}: runPlugin() threw ${e.message}`);
+      bad++;
+      continue;
+    }
+
+    const text = allText(nodes["chat-log"], []).join(" | ");
+    const problems = [];
+    for (const want of (c.mustContain || []))
+      if (!text.includes(want)) problems.push("missing " + JSON.stringify(want));
+    for (const want of (c.mustNotContain || []))
+      if (text.includes(want)) problems.push("should not contain " + JSON.stringify(want));
+    if (!c.mustContain && !c.mustNotContain) problems.push("case asserts nothing");
+
+    if (problems.length) {
+      bad += problems.length;
+      problems.forEach(p => console.log(`  FAIL ${c.name}: ${p}`));
+      console.log(`        chat log was: ${text}`);
+    } else {
+      console.log(`  ok   ${c.name.padEnd(36)} [${text.slice(0, 76)}]`);
+    }
+  }
   console.log("");
   if (bad) { console.log("FAILED - " + bad + " problem(s)"); process.exit(1); }
-  console.log("PASSED - the chat displays what the server returns");
+  console.log("PASSED - the chat displays what the server returns, "
+            + "and plugin output reaches the operator");
 })();
 """
 
@@ -282,13 +321,59 @@ def main() -> int:
         },
     ]
 
+    # Plugin runs go through runPlugin() rather than send(), and had the same
+    # defect: the endpoint returns the whole analysis and the UI discarded it.
+    plugin_cases = [
+        {
+            "name": "market check shows the analysis",
+            "plugin": "market_analyst",
+            "label": "Market analysis",
+            "response": {
+                "status": "completed",
+                "result": {
+                    "timestamp": "2026-09-17T20:00:49Z",
+                    "pairs_analyzed": 2,
+                    "regime": {"regime": "trending_up", "confidence": 0.72,
+                               "indicators": {},
+                               "description": "Higher highs across majors."},
+                    "pair_analysis": {
+                        "BTC/CAD": {"trend": "bullish", "price": 123456.78, "rsi": 58.4},
+                        "ETH/CAD": {"trend": "bearish", "price": 4321.0, "rsi": 41.2},
+                    },
+                    "alerts": [{"type": "strong_trend", "severity": "info",
+                                "message": "Strong trending_up detected",
+                                "action": "Trend-following strategies favored"}],
+                },
+            },
+            "mustContain": ["trending up", "72% confidence", "Higher highs",
+                            "BTC/CAD", "bullish", "RSI 58", "123,456.78",
+                            "ETH/CAD", "bearish", "RSI 41",
+                            "Strong trending_up detected"],
+            # The old text, which pointed at a panel that does not hold this.
+            "mustNotContain": ["Check the summary above"],
+        },
+        {
+            "name": "a failed pair is shown, not hidden",
+            "plugin": "market_analyst", "label": "Market analysis",
+            "response": {"status": "completed", "result": {
+                "pair_analysis": {"SOL/CAD": {"error": "no candles"}}}},
+            "mustContain": ["SOL/CAD", "failed: no candles"],
+        },
+        {
+            "name": "an empty result says so",
+            "plugin": "market_analyst", "label": "Market analysis",
+            "response": {"status": "completed", "result": {}},
+            "mustContain": ["no output to show"],
+        },
+    ]
+
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
         fh.write(HARNESS_TEMPLATE)
         harness = fh.name
 
     try:
         proc = subprocess.run(
-            ["node", harness, str(UI), json.dumps(cases)],
+            ["node", harness, str(UI), json.dumps(cases), json.dumps(plugin_cases)],
             capture_output=True, text=True, timeout=120,
         )
     finally:
