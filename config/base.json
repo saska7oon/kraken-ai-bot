@@ -300,7 +300,17 @@
     // In live trading the real fee comes back on the order itself, which is more
     // accurate than any number set here.
     // -------------------------------------------------------------------------
-    "fee": 0.008,
+    // FEE IS PER SIDE, and freqtrade applies it TWICE.
+    // entry_pricing/exit_pricing use price_side "same" with order_time_in_force
+    // "PO", so the bot rests on the book and pays the MAKER rate.
+    // Kraken Tier 1 ($0+): maker 0.38-0.40% a side, taker 0.80% a side.
+    // So 0.004 is right: 0.40% x 2 = 0.80% for a full round trip.
+    // This was 0.008, which charged 1.60% - double - and made every
+    // dry run and backtest look far worse than the bot would actually be.
+    // Stoploss and emergency exits are market orders and DO pay the 0.80%
+    // taker rate on that leg; they are rare and cannot be made maker.
+
+    "fee": 0.004,
 
     // -------------------------------------------------------------------------
     // PRICING
