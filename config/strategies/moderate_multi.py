@@ -5,15 +5,24 @@ Designed for $1000 CAD starting capital, moderate risk profile.
 Trades: BTC/CAD, ETH/CAD, SOL/CAD, XRP/CAD
 
 Strategy Logic:
-- Trend following with EMA crossover (9/21) + RSI filter
-- Bollinger Bands for mean reversion entries
-- MACD for momentum confirmation
-- Volume confirmation on entries
-- Dynamic position sizing via Freqtrade Edge
+- Entry: close breaks above its own highest high of the last 20 days, while
+  also above the 200-day EMA
+- Exit: close falls below its lowest low of the last 10 days
+- Stoploss: fixed at -12%
+- Freqtrade's protections cap drawdown and cool down after consecutive losses
+
+This docstring describes what the file does today. It used to list an EMA
+crossover with an RSI filter, Bollinger Bands, MACD, and "Freqtrade Edge" -
+none of which are in this file any more. The operator never saw the wrong text
+(the UI reads the DESCRIPTION attribute on the class, not this docstring), but
+anyone opening the source was told the bot did something it does not do.
 """
 
-from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, CategoricalParameter
-from freqtrade.strategy.interface import IStrategy
+import logging
+
+from freqtrade.enums import RunMode
+from freqtrade.persistence import Trade
+from freqtrade.strategy import IStrategy, IntParameter
 from pandas import DataFrame
 import talib.abstract as ta
 # `technical` is where qtpylib's indicators actually live. Importing them via
@@ -22,8 +31,10 @@ import talib.abstract as ta
 # scheduled for removal. Importing from the source means no warning now and no
 # breakage when the shim goes away.
 from technical import qtpylib
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 def _all_true(conditions: List[DataFrame]) -> DataFrame:
@@ -581,24 +592,53 @@ class ModerateMultiPairStrategy(IStrategy):
         # 5 and nothing anywhere saying why.
         #
         # max_open_trades is already enforced by freqtrade itself, so this check
-        # is a second gate. It exists so the reason is recorded, but it must read
-        # the same number the rest of the bot reads.
+        # is a second gate. `get_open_trade_count` is the right call for it: it
+        # runs a COUNT in live mode and reads the backtest counter in backtest
+        # mode, so the same line works in both. The previous version called
+        # `Trade.get_trades(is_open=True)`, which does not exist - it raised
+        # TypeError on every single entry attempt. freqtrade's safe wrapper
+        # swallows that and substitutes True, so instead of blocking anything
+        # the exception skipped the rest of this method, which meant the spread
+        # guard below never ran either.
+        # `-1` and infinity BOTH mean "no limit" in freqtrade, and -1 is not a
+        # historical curiosity: config_validation accepts it, `freqtrade
+        # new-config` offers it as "unlimited open trades", and freqtrade's own
+        # lookahead-analysis forces it. Testing only for infinity makes this
+        # line refuse every trade in those runs, because `0 >= -1` is true - a
+        # bot that silently never trades. That is exactly what happened here:
+        # the sentinel check was written against infinity alone, and the
+        # TypeError above meant it was never executed long enough to show it.
         max_open_trades = self.config.get("max_open_trades", 3)
-        if max_open_trades != float("inf") and len(self.get_open_trades()) >= max_open_trades:
+        if max_open_trades not in (float("inf"), -1) and Trade.get_open_trade_count() >= max_open_trades:
+            logger.info("Entry refused for %s: already at max_open_trades (%s)", pair, max_open_trades)
             return False
 
         # Do not enter while the book is unusually wide.
         #
-        # Measured spreads on these pairs are small - 0.004% on BTC/CAD, 0.045%
-        # on ETH/CAD - so 0.5% does not fire in normal conditions. It is a guard
-        # against the moments that are not normal: a thin CAD book during a
-        # violent move, where a resting order would be filled at a price that no
-        # longer reflects the market.
-        ticker = self.dp.ticker(pair)
-        if ticker:
-            spread = (ticker["ask"] - ticker["bid"]) / ticker["bid"]
-            if spread > 0.005:
-                return False
+        # Measured top-of-book spreads on these pairs are small - 0.0039% on
+        # BTC/CAD, 0.0071% on ETH/CAD, 0.0135% on SOL/CAD, 0.1565% on XRP/CAD -
+        # so 0.5% does not fire in normal conditions. It is a guard against the
+        # moments that are not normal: a thin CAD book during a violent move,
+        # where a resting order would be filled at a price that no longer
+        # reflects the market.
+        #
+        # This is skipped outside live/dry-run. `dp.ticker` makes a real network
+        # request, so calling it during a backtest would make the result depend
+        # on whatever the exchange happened to be quoting at the time, and the
+        # backtest could not be reproduced.
+        if self.dp.runmode in (RunMode.DRY_RUN, RunMode.LIVE):
+            ticker = self.dp.ticker(pair)
+            ask = ticker.get("ask") if ticker else None
+            bid = ticker.get("bid") if ticker else None
+            # A pair with no usable quote is not a pair to buy blind.
+            if ask and bid:
+                spread = (ask - bid) / bid
+                if spread > 0.005:
+                    logger.info(
+                        "Entry refused for %s: spread %.4f%% is wider than 0.5%%",
+                        pair, spread * 100,
+                    )
+                    return False
 
         return True
 
@@ -638,7 +678,8 @@ class ModerateMultiPairStrategy(IStrategy):
     # ============================================================
     # HELPER METHODS
     # ============================================================
-    def get_open_trades(self):
-        """Get open trades from Freqtrade."""
-        from freqtrade.persistence import Trade
-        return Trade.get_trades(is_open=True)
+    # The `get_open_trades` helper that used to live here has been removed.
+    # It wrapped a call that did not exist in this freqtrade version, and its
+    # only caller now uses `Trade.get_open_trade_count()` directly - one line
+    # that works in both live and backtest mode, instead of a helper that
+    # raised on every call.
