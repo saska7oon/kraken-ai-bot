@@ -60,7 +60,7 @@ class ModerateMultiPairStrategy(IStrategy):
     # read code is told what their bot does, instead of being shown the class
     # name. Keep it short, keep it free of jargon, and describe the *behaviour*
     # rather than the indicators.
-    DESCRIPTION = "Looks for upward trends and oversold dips across four CAD pairs, with a stop loss on every trade"
+    DESCRIPTION = "Buys when a coin breaks above its highest price in 20 days, and sells when it falls below its lowest price in 10 days"
 
     # Strategy interface version
     INTERFACE_VERSION = 3
@@ -68,51 +68,96 @@ class ModerateMultiPairStrategy(IStrategy):
     # Can this strategy go short?
     can_short: bool = False
 
-    # Minimal ROI designed for moderate risk
+    # -------------------------------------------------------------------------
+    # PROFIT TARGETS - deliberately switched off
+    # -------------------------------------------------------------------------
+    # "0": 1.0 means "take profit at +100%".
     #
-    # THE KEYS ARE MINUTES, NOT CANDLES. This ladder was written for a 5-minute
-    # timeframe, where "30" meant six candles. Moving to 1h without rescaling it
-    # would have made it decay to zero within two candles - the bot would exit at
-    # the first sign of profit, on every trade, and the numbers would still look
-    # plausible in the config. The times below are the same number of CANDLES as
-    # before: 6, 12 and 24.
+    # This is the most important line for a trend-following strategy. The
+    # previous ladder capped a trade at +4%, which cannot capture the multi-week
+    # moves this strategy exists to catch - the whole premise is that a few large
+    # winners pay for many small losers, and a cap removes the large winners.
+    #
+    # A doubling is high enough not to interfere with an ordinary trend and low
+    # enough to be a real level crypto reaches in a strong run. The project's
+    # validator caps this target at 1.0 and would reject anything above it as
+    # "a sign the numbers were invented rather than tested" - an unreachable
+    # number and a switched-off setting look the same in a config file, and only
+    # one of them is honest.
+    #
+    # THE KEYS ARE MINUTES. This is worth stating twice because it has already
+    # caused one silent bug: the ladder was written for 5m, rescaled to 1h
+    # (360/720/1440), and then the config copy was left at the 5m values
+    # (30/60/120). Because freqtrade resolves these attributes with the
+    # precedence "Configuration, Strategy, default", the stale config copy won.
+    # At 1d the 5m ladder meant "sell any profitable position after 2 hours",
+    # which is one twelfth of a single candle.
+    #
+    # Both copies are now {"0": 1.0} and ai_orchestrator/tests/test_timeframe_units.py
+    # checks the config as well as this file, so a stale copy cannot hide again.
     minimal_roi = {
-        "0": 0.04,
-        "360": 0.02,     # 6 candles at 1h
-        "720": 0.01,     # 12 candles
-        "1440": 0        # 24 candles
+        "0": 1.0
     }
 
-    # Stoploss
-    stoploss = -0.08
+    # -------------------------------------------------------------------------
+    # STOPLOSS - sized from measured volatility, not from a round number
+    # -------------------------------------------------------------------------
+    # Average True Range over 14 days, from Kraken's own daily candles:
+    #
+    #     BTC/CAD   2.70%      2xATR =  5.4%
+    #     ETH/CAD   3.69%      2xATR =  7.4%
+    #     SOL/CAD   4.22%      2xATR =  8.4%
+    #     XRP/CAD   5.72%      2xATR = 11.4%
+    #
+    # -0.12 clears 2xATR on all four. The old -0.08 was only 1.4xATR on XRP,
+    # which is inside the normal daily range - it would have been hit by noise
+    # rather than by the trade being wrong.
+    #
+    # This is a plain number and NOT a custom_stoploss, deliberately. See RULE 2
+    # in ai_orchestrator/plugins/strategy_generator.py: a code-driven stop means
+    # nobody can say in advance how much a trade could lose. A number can be
+    # stated in advance: at most 12%.
+    #
+    # A custom_stoploss method used to exist here. It was dead code -
+    # use_custom_stoploss defaults to False and was never set, so freqtrade never
+    # called it - and it has been removed rather than enabled, because enabling
+    # it would have made the maximum loss unknowable.
+    stoploss = -0.12
 
-    # Trailing stoploss
+    # Trailing stop: once a trade is up 10%, follow the price down no closer than
+    # 8% behind its peak, locking in roughly +2% at worst.
+    #
+    # 0.02/0.03 were 5m values. A 2% trail is smaller than one ordinary day's
+    # range on every one of these pairs, so it would exit on the first quiet
+    # pullback.
     trailing_stop = True
-    trailing_stop_positive = 0.02
-    trailing_stop_positive_offset = 0.03
+    trailing_stop_positive = 0.08
+    trailing_stop_positive_offset = 0.10
     trailing_only_offset_is_reached = False
 
-    # Timeframe
+    # -------------------------------------------------------------------------
+    # TIMEFRAME - 1 day
+    # -------------------------------------------------------------------------
+    # This is the change that matters most, and it is arithmetic rather than
+    # preference. Kraken Tier 1 charges 0.80% taker each way, so a round trip
+    # costs 1.60% at taker, or 0.80% at maker (which this bot now guarantees via
+    # post-only orders). Measured live from Kraken's public OHLC:
     #
-    # 1h, not 5m. This is the single change that matters most, and it is not a
-    # tuning preference - it is arithmetic.
+    #     pair       mean 5m range   mean 1h range   mean 1d range
+    #     BTC/CAD    0.075%          0.650%          3.37%
+    #     SOL/CAD    0.076%          0.914%          6.59%
+    #     XRP/CAD    0.110%          1.237%          6.06%
+    #     ETH/CAD    -               0.740%          5.19%
     #
-    # Kraken Tier 1 charges 0.80% taker each way, so a round trip costs 1.60%.
-    # Measured live from Kraken's public OHLC for the configured pairs:
-    #
-    #     pair       mean 5m candle range    mean 1h candle range
-    #     BTC/CAD    0.075%                  0.650%
-    #     SOL/CAD    0.076%                  0.914%
-    #     XRP/CAD    0.110%                  1.237%
-    #
-    # On 5m the price would have to move about 21 candles' worth just to cover the
-    # fee. On 1h that falls to between 1.3 and 2.5 candles. No strategy choice
+    # On 5m the price had to move about 21 candles' worth just to cover the fee.
+    # On 1d, BTC/CAD's fee is 0.24x a single candle's range. No strategy choice
     # closes a 21x gap; the timeframe does.
     #
-    # The CAD pairs are also thin at 5m: 36% of BTC/CAD 5m candles have zero range
-    # and 18% have zero volume, so there were five-minute windows in which nothing
-    # traded at all.
-    timeframe = "1h"
+    # Kraken serves exactly 721 daily candles, about two years. That is a real
+    # limitation and it is why the backtest numbers for this strategy swing from
+    # -3.40% to +4.65% per month on arbitrary parameter choices: two years is one
+    # market regime, not a sample.
+    timeframe = "1d"
 
     # Process only new candles
     process_only_new_candles = True
@@ -122,7 +167,9 @@ class ModerateMultiPairStrategy(IStrategy):
     exit_profit_only = False
     ignore_roi_if_entry_signal = False
 
-    # Number of candles required before strategy produces valid signals
+    # Number of candles required before strategy produces valid signals.
+    # The trend filter uses a 200-day EMA, so 200 daily candles must exist
+    # before the first signal can be evaluated - about seven months of data.
     startup_candle_count: int = 200
 
     # -------------------------------------------------------------------------
@@ -142,19 +189,37 @@ class ModerateMultiPairStrategy(IStrategy):
     # They are active in dry-run and live trading automatically. Backtesting and
     # hyperopt only honour them when --enable-protections is passed.
     #
-    # Timings are in CANDLES, so every number below had to be rescaled when the
-    # timeframe moved from 5m to 1h. Left alone, the "24 hour" drawdown window
-    # would have become twelve days and the 1-hour cooldown would have become
-    # twelve hours - while the comments still described the old durations.
+    # Timings are in CANDLES. This is the third timeframe this strategy has been
+    # on, and each move silently reinterprets every number below:
     #
-    # At 1h:  1 candle = 1 hour, 8 = 8 hours, 24 = 24 hours.
+    #     at 5m   1 candle = 5 minutes
+    #     at 1h   1 candle = 1 hour
+    #     at 1d   1 candle = 1 day      <- now
     #
-    # Protections are evaluated in the order defined below.
+    # The values were last set for 1h, where 24 candles meant one day. At 1d the
+    # same 24 means twenty-four days, so a drawdown circuit breaker that was
+    # meant to pause the bot for a day would have paused it for over three weeks.
+    # Nothing would have errored; the bot would simply have stopped trading for a
+    # month and the config would still have said "24".
+    #
+    # So these are NOT a mechanical rescale. A one-candle lookback is the
+    # mechanical answer at 1d and it is useless - a drawdown measured over a
+    # single day tells you almost nothing. The numbers below are re-derived from
+    # what each guard is FOR:
+    #
+    #   MaxDrawdown    look back ~3.5 weeks, pause 1 week
+    #   StoplossGuard  look back 10 days, pause 5 days
+    #   CooldownPeriod 1 day, which is one candle
+    #
+    # The pause durations are deliberately much shorter than 24 candles. A
+    # circuit breaker exists to stop the bot digging while a regime is hostile,
+    # not to sit out a quarter of the year - and at a daily timeframe, a week is
+    # already a long time to be flat.
     @property
     def protections(self):
         return [
-            # Stop trading entirely if the account loses more than 10% within a
-            # day. Without this, nothing stops a losing streak.
+            # Stop trading entirely if the account loses more than 10% within the
+            # lookback window. Without this, nothing stops a losing streak.
             #
             # calculation_mode "equity" measures real peak-to-trough drawdown on
             # the account equity curve. The legacy "ratios" mode derives it from
@@ -164,67 +229,92 @@ class ModerateMultiPairStrategy(IStrategy):
             {
                 "method": "MaxDrawdown",
                 "calculation_mode": "equity",
-                "lookback_period_candles": 24,    # last 24 hours
+                "lookback_period_candles": 24,    # 24 days, about 3.5 weeks
                 "trade_limit": 10,                # wait for a real sample
-                "stop_duration_candles": 24,      # then pause 24 hours
+                "stop_duration_candles": 7,       # then pause 1 week
                 "max_allowed_drawdown": 0.10,     # 10%
             },
-            # If 3 trades hit their stop loss within 8 hours, something is wrong
+            # If 3 trades hit their stop loss within 10 days, something is wrong
             # with the market or the strategy. Pause the whole account rather
             # than keep feeding it money.
+            #
+            # trade_limit 3 is a low bar on purpose. With a -12% stop and at most
+            # 3 positions, three stopouts is a meaningful fraction of the wallet,
+            # and the pairs are 0.775 correlated on average - so they tend to stop
+            # out together rather than independently.
             {
                 "method": "StoplossGuard",
-                "lookback_period_candles": 8,
+                "lookback_period_candles": 10,
                 "trade_limit": 3,
-                "stop_duration_candles": 8,
+                "stop_duration_candles": 5,       # pause 5 days
                 "required_profit": 0.0,           # count all losing stoplosses
                 "only_per_pair": False,           # account-wide, not per pair
             },
-            # After any exit, wait 1 hour before re-entering that pair. Prevents
-            # rapid re-entry churn, which mostly generates fees.
+            # After any exit, wait one candle - one day - before re-entering that
+            # pair. Prevents rapid re-entry churn, which mostly generates fees.
             {
                 "method": "CooldownPeriod",
                 "stop_duration_candles": 1,
             },
         ]
 
-    # Order types
+    # -------------------------------------------------------------------------
+    # ORDER TYPES AND TIME IN FORCE
+    # -------------------------------------------------------------------------
+    # These MUST match config/base.json, and the config is what actually wins:
+    # ("order_types", None) and ("order_time_in_force", None) are both in the
+    # override list in freqtrade/resolvers/strategy_resolver.py.
+    #
+    # They are repeated here rather than left out because a strategy should
+    # describe itself. But a copy that contradicts the config is worse than no
+    # copy at all - this block used to declare order_time_in_force "GTC" while
+    # the config said "PO", so anyone reading the strategy would have concluded
+    # the bot was not using post-only orders, and they would have been reading
+    # the file that loses.
+    #
+    # stoploss_on_exchange is false in both. With it true, freqtrade places a
+    # stop order on Kraken itself, which would fire even if the bot is down - but
+    # Kraken's stop orders are market orders, so a wick would take the taker fee
+    # and the fill could be far from the stop price. The bot checks the stoploss
+    # every candle instead, which on a daily timeframe is the same cadence the
+    # rest of the strategy runs at.
     order_types = {
         "entry": "limit",
         "exit": "limit",
+        "emergency_exit": "market",
+        "force_entry": "market",
+        "force_exit": "market",
         "stoploss": "market",
-        "stoploss_on_exchange": True,
-        "stoploss_on_exchange_interval": 60,
-        "stoploss_on_exchange_limit_ratio": 0.99,
+        "stoploss_on_exchange": False,
     }
 
-    # Time in force
+    # "PO" is Post Only - Kraken rejects the order if it would cross the spread,
+    # so the maker rate is guaranteed rather than hoped for. See the long note in
+    # config/base.json for why a limit order alone is not enough.
     order_time_in_force = {
-        "entry": "GTC",
-        "exit": "GTC"
+        "entry": "PO",
+        "exit": "PO",
     }
 
-    # Plot configuration for FreqUI
+    # Plot configuration for FreqUI.
+    #
+    # Every column named here must exist in the dataframe, and this list used to
+    # name ema_9, ema_21, ema_50, ema_200, bb_lowerband, macd, rsi and
+    # stoch_rsi_k - none of which populate_indicators produces any more. FreqUI
+    # would have shown empty panels for an indicator set the strategy no longer
+    # computes, which reads as a broken chart rather than a stale config.
+    #
+    # The Donchian channel is the strategy's whole thesis, so it belongs on the
+    # price chart: a breakout is visible as price crossing the upper line.
     plot_config = {
         "main_plot": {
-            "ema_9": {"color": "#2962FF"},
-            "ema_21": {"color": "#FF6D00"},
-            "ema_50": {"color": "#00C853"},
-            "ema_200": {"color": "#D50000"},
-            "bb_lowerband": {"color": "#757575"},
-            "bb_middleband": {"color": "#757575"},
-            "bb_upperband": {"color": "#757575"},
+            "donchian_high": {"color": "#D50000"},   # the entry trigger
+            "donchian_low": {"color": "#00C853"},    # the exit trigger
+            "ema_trend": {"color": "#2962FF"},       # the trend filter
         },
         "subplots": {
-            "rsi": {
-                "rsi": {"color": "#AA00FF"},
-                "rsi_overbought": {"color": "#FF0000"},
-                "rsi_oversold": {"color": "#00FF00"},
-            },
-            "macd": {
-                "macd": {"color": "#2962FF"},
-                "macdsignal": {"color": "#FF6D00"},
-                "macdhist": {"color": "#00C853"},
+            "atr": {
+                "atr_percent": {"color": "#FF6D00"},
             },
             "volume": {
                 "volume": {"color": "#424242"},
@@ -233,47 +323,48 @@ class ModerateMultiPairStrategy(IStrategy):
     }
 
     # ============================================================
-    # HYPEROPT PARAMETERS (Can be optimized)
+    # PARAMETERS
     # ============================================================
-
-    # RSI parameters
-    buy_rsi_enabled = CategoricalParameter([True, False], default=True, space="buy", optimize=True)
-    buy_rsi_value = IntParameter(20, 40, default=30, space="buy", optimize=True)
-    sell_rsi_enabled = CategoricalParameter([True, False], default=True, space="sell", optimize=True)
-    sell_rsi_value = IntParameter(60, 80, default=70, space="sell", optimize=True)
-
-    # EMA parameters
-    buy_ema_short = IntParameter(5, 15, default=9, space="buy", optimize=True)
-    buy_ema_long = IntParameter(18, 30, default=21, space="buy", optimize=True)
-    # How many candles an EMA crossover keeps counting as a fresh trend.
+    # These are the CLASSIC Donchian channel values, not tuned ones, and that is
+    # a deliberate choice rather than laziness.
     #
-    # A crossover is a one-candle event; the trend it announces lasts longer.
-    # Requiring the crossing candle itself is what made this strategy unable to
-    # trade: it needed an EMA cross AND a MACD cross on the same 5-minute
-    # candle, which over 400 candles of real-shaped data happened zero times.
-    # Default 8, not 4. ADX and the directional indicators are computed over a
-    # 14-period window and therefore LAG a trend change: after an EMA crossover
-    # it takes several candles before DI+ actually exceeds DI-. With a window
-    # shorter than that, the entry demanded the crossover and its own
-    # confirmation on the same candle and could not fire at all.
-    buy_trend_window = IntParameter(1, 20, default=8, space="buy", optimize=True)
+    # The Turtle traders used a 20-day breakout for entry and a 10-day breakout
+    # for exit (their "System 1"). 20 and 10 are round numbers that were chosen
+    # before anyone had this data, which is exactly what makes them trustworthy:
+    # they cannot have been fitted to the two years Kraken will give us.
+    #
+    # WHY NOT OPTIMIZE. A parameter sweep over this strategy on real Kraken daily
+    # data produced:
+    #
+    #     15/8  +4.65%/mo      30/15  +3.75%/mo      20/10  +2.93%/mo
+    #     20/20 +4.15%/mo      25/12  +1.59%/mo      10/5   +1.92%/mo
+    #     40/20 +3.88%/mo      50/25  -3.40%/mo
+    #
+    # A range of -3.40% to +4.65% per month from arbitrary neighbouring numbers
+    # is not a strategy with a good setting inside it. It is noise, and picking
+    # the top of that range would be fitting to one regime. The honest reading is
+    # that this edge is unproven and may be zero - the sweep is why the bot runs
+    # in dry-run to collect its own evidence instead of trusting a backtest.
+    #
+    # 50/25 going negative is the useful warning: a slower version of the same
+    # idea lost money over the same two years, so the sign of the result depends
+    # on the window rather than on the idea.
+    #
+    # Hyperopt is left switched off (optimize=False) on purpose. A tool that
+    # searches thousands of combinations will always find a profitable one in a
+    # two-year sample, and that number would not survive contact with next year.
+    entry_window = IntParameter(10, 60, default=20, space="buy", optimize=False)
+    exit_window = IntParameter(5, 40, default=10, space="sell", optimize=False)
 
-    # Bollinger Bands parameters
-    buy_bb_enabled = CategoricalParameter([True, False], default=True, space="buy", optimize=True)
-    buy_bb_std = DecimalParameter(1.5, 2.5, default=2.0, space="buy", optimize=True)
-    sell_bb_enabled = CategoricalParameter([True, False], default=True, space="sell", optimize=True)
-
-    # MACD parameters
-    buy_macd_enabled = CategoricalParameter([True, False], default=True, space="buy", optimize=True)
-    sell_macd_enabled = CategoricalParameter([True, False], default=True, space="sell", optimize=True)
-
-    # Volume parameters
-    volume_enabled = CategoricalParameter([True, False], default=True, space="buy", optimize=True)
-    volume_factor = DecimalParameter(1.0, 3.0, default=1.5, space="buy", optimize=True)
-
-    # Trend filter (ADX)
-    adx_enabled = CategoricalParameter([True, False], default=True, space="buy", optimize=True)
-    adx_value = IntParameter(20, 35, default=25, space="buy", optimize=True)
+    # Trend filter: only buy breakouts that happen above the 200-day EMA.
+    #
+    # A breakout is a statement that price is going up. In a sustained downtrend
+    # breakouts fail far more often, and each failure costs the full fee. This
+    # filter removes counter-trend entries rather than trying to time them.
+    #
+    # 200 daily candles is about seven months, and startup_candle_count must be
+    # at least this long or the first signals are computed on a partial EMA.
+    trend_filter_window = IntParameter(100, 250, default=200, space="buy", optimize=False)
 
     # ============================================================
     # INFORMATIVE PAIRS (Optional - for correlation filtering)
@@ -292,102 +383,75 @@ class ModerateMultiPairStrategy(IStrategy):
     # ============================================================
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Adds several technical analysis indicators to the dataframe.
+        Donchian channels, a long-term trend filter, and ATR for reference.
+
+        A Donchian channel is simply the highest high and the lowest low over the
+        last N candles. Breaking above the high is the entry; falling below the
+        low is the exit. It is the oldest mechanical trend-following rule there
+        is, which is a feature: it was not discovered by searching this data.
         """
 
         # ---------------------------------------------------------
-        # RSI
+        # Donchian channels
         # ---------------------------------------------------------
-        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
-        dataframe["rsi_overbought"] = 70
-        dataframe["rsi_oversold"] = 30
-
-        # ---------------------------------------------------------
-        # EMAs
-        # ---------------------------------------------------------
-        dataframe["ema_9"] = ta.EMA(dataframe, timeperiod=9)
-        dataframe["ema_21"] = ta.EMA(dataframe, timeperiod=21)
-        dataframe["ema_50"] = ta.EMA(dataframe, timeperiod=50)
-        dataframe["ema_200"] = ta.EMA(dataframe, timeperiod=200)
-
-        # EMA crossover signals
-        dataframe["ema_cross_up"] = qtpylib.crossed_above(
-            dataframe["ema_9"], dataframe["ema_21"]
+        # shift(1) IS LOAD-BEARING AND MUST NOT BE REMOVED.
+        #
+        # Without it, the current candle's own high is included in the maximum it
+        # is being compared against. close > max(high) including today's high is
+        # true only when today closed exactly at its high - and on the candles
+        # where it does fire, the strategy is being told about the breakout using
+        # the breakout candle itself.
+        #
+        # shift(1) makes the channel the highest high of the candles BEFORE this
+        # one, so the comparison is "is today's close above everything that came
+        # before it". That is the real question, and it is answerable at the
+        # moment the candle closes.
+        #
+        # A lookahead here would not crash and would not look wrong. It would
+        # simply make every backtest better than the strategy can be, which is
+        # the most expensive kind of bug to ship.
+        dataframe["donchian_high"] = (
+            dataframe["high"].rolling(self.entry_window.value).max().shift(1)
         )
-        dataframe["ema_cross_down"] = qtpylib.crossed_below(
-            dataframe["ema_9"], dataframe["ema_21"]
+        dataframe["donchian_low"] = (
+            dataframe["low"].rolling(self.exit_window.value).min().shift(1)
         )
 
-        # ---------------------------------------------------------
-        # Bollinger Bands
-        # ---------------------------------------------------------
-        bb = qtpylib.bollinger_bands(qtpylib.typical_price(dataframe), window=20, stds=2)
-        dataframe["bb_lowerband"] = bb["lower"]
-        dataframe["bb_middleband"] = bb["mid"]
-        dataframe["bb_upperband"] = bb["upper"]
-        dataframe["bb_percent"] = (dataframe["close"] - dataframe["bb_lowerband"]) / (
-            dataframe["bb_upperband"] - dataframe["bb_lowerband"]
-        )
-        dataframe["bb_width"] = (
-            dataframe["bb_upperband"] - dataframe["bb_lowerband"]
-        ) / dataframe["bb_middleband"]
-
-        # ---------------------------------------------------------
-        # MACD
-        # ---------------------------------------------------------
-        macd = ta.MACD(dataframe, fastperiod=12, slowperiod=26, signalperiod=9)
-        dataframe["macd"] = macd["macd"]
-        dataframe["macdsignal"] = macd["macdsignal"]
-        dataframe["macdhist"] = macd["macdhist"]
-        dataframe["macd_cross_up"] = qtpylib.crossed_above(
-            dataframe["macd"], dataframe["macdsignal"]
-        )
-        dataframe["macd_cross_down"] = qtpylib.crossed_below(
-            dataframe["macd"], dataframe["macdsignal"]
+        # How far price sits above or below the channel, as a percentage. Not
+        # used by the signals - it is plotted so a human can see how decisive a
+        # given breakout was rather than only whether it happened.
+        dataframe["donchian_position"] = (
+            (dataframe["close"] - dataframe["donchian_low"])
+            / (dataframe["donchian_high"] - dataframe["donchian_low"])
         )
 
         # ---------------------------------------------------------
-        # ADX (Trend Strength)
+        # Trend filter
         # ---------------------------------------------------------
-        dataframe["adx"] = ta.ADX(dataframe, timeperiod=14)
-        dataframe["di_plus"] = ta.PLUS_DI(dataframe, timeperiod=14)
-        dataframe["di_minus"] = ta.MINUS_DI(dataframe, timeperiod=14)
+        # Breakouts fail more often in downtrends, and every failure costs a full
+        # round trip in fees. This only permits breakouts above the long EMA.
+        #
+        # On daily candles the default 200 is about seven months of history.
+        dataframe["ema_trend"] = ta.EMA(
+            dataframe, timeperiod=self.trend_filter_window.value
+        )
 
         # ---------------------------------------------------------
-        # Volume
+        # ATR - measured, and used to justify the stoploss number
         # ---------------------------------------------------------
-        dataframe["volume_mean"] = dataframe["volume"].rolling(window=20).mean()
-        dataframe["volume_ratio"] = dataframe["volume"] / dataframe["volume_mean"]
-
-        # ---------------------------------------------------------
-        # ATR (Volatility)
-        # ---------------------------------------------------------
+        # The signals below do not read this. It is here because the stoploss is
+        # a fixed -12% and that number is only defensible relative to volatility:
+        # measured daily ATR is 2.70% (BTC), 3.69% (ETH), 4.22% (SOL) and 5.72%
+        # (XRP), so -12% is at least 2.1xATR on all four. Plotting it makes that
+        # claim checkable against live data instead of taken on trust.
         dataframe["atr"] = ta.ATR(dataframe, timeperiod=14)
         dataframe["atr_percent"] = dataframe["atr"] / dataframe["close"] * 100
 
         # ---------------------------------------------------------
-        # Stochastic RSI
+        # Volume - context, and a tradability guard
         # ---------------------------------------------------------
-        stoch_rsi = ta.STOCHRSI(dataframe, timeperiod=14, fastk_period=3, fastd_period=3)
-        dataframe["stoch_rsi_k"] = stoch_rsi["fastk"]
-        dataframe["stoch_rsi_d"] = stoch_rsi["fastd"]
-
-        # ---------------------------------------------------------
-        # Pair-specific adjustments
-        # ---------------------------------------------------------
-        pair = metadata.get("pair", "")
-        if pair:
-            # Adjust parameters per pair volatility
-            if "BTC" in pair:
-                dataframe["pair_volatility_factor"] = 1.0
-            elif "ETH" in pair:
-                dataframe["pair_volatility_factor"] = 1.1
-            elif "SOL" in pair:
-                dataframe["pair_volatility_factor"] = 1.5
-            elif "XRP" in pair:
-                dataframe["pair_volatility_factor"] = 1.3
-            else:
-                dataframe["pair_volatility_factor"] = 1.0
+        dataframe["volume_mean"] = dataframe["volume"].rolling(window=20).mean()
+        dataframe["volume_ratio"] = dataframe["volume"] / dataframe["volume_mean"]
 
         return dataframe
 
@@ -396,127 +460,43 @@ class ModerateMultiPairStrategy(IStrategy):
     # ============================================================
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Generate buy signals based on multiple confluence factors.
+        Buy when price closes above its highest close in entry_window days, while
+        above the long-term trend filter.
         """
 
-        # ---------------------------------------------------------
-        # Condition 1: Trend Following (EMA Crossover + RSI)
-        # ---------------------------------------------------------
-        trend_conditions = []
-
-        if self.buy_ema_short.value and self.buy_ema_long.value:
-            # EMA crossover (short crosses above long), counted as still live
-            # for buy_trend_window candles afterwards.
-            #
-            # The second half of the condition matters: the short EMA must
-            # still be above the long one. Without it, a crossover followed
-            # immediately by a cross back down would keep registering as a
-            # bullish entry for the rest of the window.
-            ema_short = ta.EMA(dataframe, timeperiod=self.buy_ema_short.value)
-            ema_long = ta.EMA(dataframe, timeperiod=self.buy_ema_long.value)
-            ema_cross = qtpylib.crossed_above(ema_short, ema_long)
-            ema_cross_recent = (
-                ema_cross.rolling(self.buy_trend_window.value, min_periods=1).max().astype(bool)
-                & (ema_short > ema_long)
-            )
-            trend_conditions.append(ema_cross_recent)
-
-        if self.buy_rsi_enabled.value:
-            # RSI still oversold: the trend is turning, not yet extended.
-            #
-            # The comment here used to read "RSI not overbought" while the code
-            # required RSI *below* buy_rsi_value (default 30, range 20-40). The
-            # code and the parameter range agree with each other, so the comment
-            # was the wrong one. Worth stating plainly because it is the single
-            # most restrictive condition left: of 28 candles with a recent EMA
-            # crossover, only 8 also had RSI under 30. That is the intended
-            # trade-off - it buys the turn rather than the run - but it should
-            # be a known choice rather than an accident of a stale comment.
-            rsi_ok = dataframe["rsi"] < self.buy_rsi_value.value
-            trend_conditions.append(rsi_ok)
-
-        if self.adx_enabled.value:
-            # ADX shows trend strength
-            adx_ok = (dataframe["adx"] > self.adx_value.value) & (dataframe["di_plus"] > dataframe["di_minus"])
-            trend_conditions.append(adx_ok)
-
-        if self.buy_macd_enabled.value:
-            # MACD bullish: momentum is with the trade.
-            #
-            # This was a *second crossover* rather than a state, which turned
-            # "MACD for momentum confirmation" into a second one-candle event
-            # that had to coincide with the first. Two independent crossovers
-            # landing on the same candle is vanishingly rare, so the entry
-            # never fired. Confirmation is a condition that holds, not an
-            # event that happens.
-            macd_bullish = dataframe["macd"] > dataframe["macdsignal"]
-            trend_conditions.append(macd_bullish)
-
-        if self.volume_enabled.value:
-            # Volume confirmation
-            volume_ok = dataframe["volume_ratio"] > self.volume_factor.value
-            trend_conditions.append(volume_ok)
-
-
-        # ---------------------------------------------------------
-        # Condition 2: Mean Reversion (Bollinger Bands + RSI)
-        # ---------------------------------------------------------
-        mr_conditions = []
-
-        if self.buy_bb_enabled.value:
-            # Price near lower Bollinger Band
-            bb_oversold = dataframe["bb_percent"] < 0.1
-            mr_conditions.append(bb_oversold)
-
-            # RSI oversold
-            if self.buy_rsi_enabled.value:
-                rsi_oversold = dataframe["rsi"] < 35
-                mr_conditions.append(rsi_oversold)
-
-            # MACD histogram turning up
-            if self.buy_macd_enabled.value:
-                macd_hist_up = dataframe["macdhist"] > dataframe["macdhist"].shift(1)
-                mr_conditions.append(macd_hist_up)
-
-            # Volume spike
-            if self.volume_enabled.value:
-                volume_spike = dataframe["volume_ratio"] > (self.volume_factor.value * 1.5)
-                mr_conditions.append(volume_spike)
-
-        # Combine mean reversion conditions
-
-        # ---------------------------------------------------------
-        # Apply all conditions
-        #
-        # Within a group every condition must hold (AND) - they are
-        # confirmations of one idea. Between groups either is enough (OR) - a
-        # trend entry and a mean-reversion entry are different reasons to buy,
-        # and neither is a prerequisite for the other.
-        #
-        # This block previously read `conditions[0] | conditions[1]`, which
-        # combined two *lists* rather than two Series and raised
-        # "TypeError: unsupported operand type(s) for |: 'list' and 'list'" on
-        # every candle for every pair. The bot ran, fetched candles and could
-        # not evaluate a single entry signal. Groups are reduced explicitly now,
-        # so the operand is unambiguously a Series.
-        # ---------------------------------------------------------
-        # freqtrade pre-creates enter_tag but not enter_long, and assigning
-        # through .loc creates the column as NaN everywhere the mask is False.
-        # A NaN signal is not a valid 0/1 and would be read as "no signal" only
-        # by luck, so both columns start defined.
+        # Both columns are defined before any .loc assignment. Assigning through
+        # .loc creates the column as NaN everywhere the mask is False, and a NaN
+        # is not a valid 0/1 signal - it would be read as "no signal" only by
+        # luck. enter_long in particular is NOT pre-created by freqtrade.
         dataframe["enter_long"] = 0
+        dataframe["enter_tag"] = ""
 
-        if trend_conditions:
-            trend_signal = _all_true(trend_conditions)
-            dataframe.loc[trend_signal, "enter_long"] = 1
-            dataframe.loc[trend_signal, "enter_tag"] = "trend_follow"
+        # The breakout: today's close above every high of the previous 20 days.
+        breakout = dataframe["close"] > dataframe["donchian_high"]
 
-        if mr_conditions:
-            mr_signal = _all_true(mr_conditions)
-            dataframe.loc[mr_signal, "enter_long"] = 1
-            # Where both fire, the mean-reversion reason is recorded, matching
-            # the precedence this strategy had before the fix.
-            dataframe.loc[mr_signal, "enter_tag"] = "mean_reversion"
+        # Only in an uptrend. This is the filter that stops the bot buying
+        # breakouts into a falling market.
+        uptrend = dataframe["close"] > dataframe["ema_trend"]
+
+        # NaN GUARD, and it is not cosmetic. The first entry_window candles have
+        # no channel, so donchian_high is NaN there. Every comparison against NaN
+        # is False, which happens to be the safe answer - but the EMA comparison
+        # is NaN too, and relying on NaN comparisons to fail in the right
+        # direction is relying on luck. This states the requirement outright.
+        has_history = (
+            dataframe["donchian_high"].notna() & dataframe["ema_trend"].notna()
+        )
+
+        # A candle with no volume is not a price anyone traded at. This matters
+        # more on the thin CAD books than it would on a major pair: 18% of
+        # BTC/CAD 5-minute candles had zero volume, and a "breakout" printed on
+        # one of those is a quote, not a trade.
+        tradable = dataframe["volume"] > 0
+
+        signal = breakout & uptrend & has_history & tradable
+
+        dataframe.loc[signal, "enter_long"] = 1
+        dataframe.loc[signal, "enter_tag"] = "donchian_breakout"
 
         return dataframe
 
@@ -525,113 +505,55 @@ class ModerateMultiPairStrategy(IStrategy):
     # ============================================================
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
-        Generate sell signals.
+        Sell when price closes below its lowest close in exit_window days.
+
+        The exit window is deliberately shorter than the entry window (10 vs 20).
+        That asymmetry is the classic Turtle shape and it is what makes the
+        strategy trend-following rather than a coin flip: entries need a high bar
+        to happen at all, exits need a low one so that a position which has
+        stopped working is left quickly. A trade therefore stays open while the
+        trend persists and closes when it breaks.
         """
 
-        conditions = []
-
-        # ---------------------------------------------------------
-        # Condition 1: Trend Reversal (EMA Cross Down)
-        # ---------------------------------------------------------
-        if self.sell_rsi_enabled.value:
-            rsi_overbought = dataframe["rsi"] > self.sell_rsi_value.value
-            conditions.append(rsi_overbought)
-
-        # EMA crossover down
-        ema_cross_down = qtpylib.crossed_below(dataframe["ema_9"], dataframe["ema_21"])
-        conditions.append(ema_cross_down)
-
-        # MACD bearish crossover
-        if self.sell_macd_enabled.value:
-            macd_cross_down = qtpylib.crossed_below(dataframe["macd"], dataframe["macdsignal"])
-            conditions.append(macd_cross_down)
-
-        # ---------------------------------------------------------
-        # Condition 2: Mean Reversion Exit (Upper BB)
-        # ---------------------------------------------------------
-        if self.sell_bb_enabled.value:
-            bb_overbought = dataframe["bb_percent"] > 0.9
-            conditions.append(bb_overbought)
-
-        # ---------------------------------------------------------
-        # Apply exit conditions
-        # ---------------------------------------------------------
-        # Exits combine with OR, not AND, and that asymmetry with the entry
-        # logic is deliberate: buying wants confirmations, selling wants to be
-        # easy. Any one warning sign is enough to leave a position.
-        #
-        # This block previously read
-        #   conditions[0] | conditions[1] if len(conditions) > 1 else conditions[0]
-        # which silently ignored conditions[2] and beyond. With the MACD and
-        # Bollinger exits enabled that dropped two of the four configured exit
-        # reasons - and made their sell_macd_enabled / sell_bb_enabled switches
-        # do nothing at all, which is worse than an obviously broken exit
-        # because the operator sees a setting that appears to work.
-        #
-        # As with the entry signal, the column is defined first: assigning
-        # through .loc otherwise leaves NaN wherever the mask is False.
         dataframe["exit_long"] = 0
 
-        if conditions:
-            dataframe.loc[_any_true(conditions), "exit_long"] = 1
+        breakdown = dataframe["close"] < dataframe["donchian_low"]
+        has_history = dataframe["donchian_low"].notna()
+
+        dataframe.loc[breakdown & has_history, "exit_long"] = 1
 
         return dataframe
 
     # ============================================================
-    # CUSTOM ENTRY PRICE (Limit Orders)
+    # ORDER PRICING - deliberately NOT overridden here
     # ============================================================
-    def custom_entry_price(
-        self, pair: str, current_time: datetime, proposed_rate: float,
-        entry_tag: Optional[str], side: str, **kwargs
-    ) -> float:
-        """
-        Custom entry price for limit orders.
-        Places limit order slightly below current price for better fill.
-        """
-        # Get current ticker from exchange
-        # For now, use a small offset
-        if entry_tag == "mean_reversion":
-            # More aggressive for mean reversion
-            return proposed_rate * 0.998
-        else:
-            # Standard trend follow
-            return proposed_rate * 0.999
-
-    # ============================================================
-    # CUSTOM EXIT PRICE (Limit Orders)
-    # ============================================================
-    def custom_exit_price(
-        self, pair: str, trade: "Trade", current_time: datetime,
-        proposed_rate: float, current_profit: float, **kwargs
-    ) -> float:
-        """
-        Custom exit price for limit orders.
-        """
-        if current_profit > 0.02:
-            # In profit - place limit slightly above
-            return proposed_rate * 1.001
-        else:
-            # Near break-even or loss - market order via stoploss_on_exchange
-            return proposed_rate
-
-    # ============================================================
-    # CUSTOM STOPLOSS
-    # ============================================================
-    def custom_stoploss(
-        self, pair: str, trade: "Trade", current_time: datetime,
-        current_rate: float, current_profit: float, **kwargs
-    ) -> float:
-        """
-        Dynamic stoploss based on volatility (ATR).
-        """
-        # Get ATR from dataframe
-        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-        if len(dataframe) > 0:
-            last_atr = dataframe["atr"].iloc[-1]
-            # Use 2x ATR as stoploss, but cap at configured stoploss
-            atr_stoploss = - (last_atr * 2) / current_rate
-            return max(atr_stoploss, self.stoploss)
-        return self.stoploss
+    # custom_entry_price and custom_exit_price used to be defined here. They have
+    # been removed so that order pricing has exactly ONE source of truth: the
+    # entry_pricing / exit_pricing blocks in config/base.json.
+    #
+    # Two reasons, and the second is the important one.
+    #
+    # 1. They were partly dead. custom_entry_price branched on
+    #    entry_tag == "mean_reversion", and that tag no longer exists - entries
+    #    are tagged "donchian_breakout" now. The branch could never be taken.
+    #
+    # 2. They silently overrode the maker logic. When custom_entry_price is
+    #    defined, freqtrade uses the price it returns and entry_pricing.price_side
+    #    never decides anything. So the config could say price_side "same" - the
+    #    resting side, the maker side - and the order would still be placed by a
+    #    number in this file. A reader checking the config would have concluded
+    #    the bot rests on the book, and they would have been reading the wrong
+    #    file.
+    #
+    # That is the same failure mode as the minimal_roi ladder and the
+    # use_custom_stoploss flag: two places claiming to control one thing, where
+    # the copy that looks authoritative is not the one in force.
+    #
+    # With these gone, pricing comes from the config:
+    #     entry_pricing.price_side = "same"   -> the bid, a resting buy
+    #     exit_pricing.price_side  = "same"   -> the ask, a resting sell
+    #     order_time_in_force      = "PO"     -> Kraken rejects a crossing order
+    # and all three are checked by ai_orchestrator/tests/test_order_types.py.
 
     # ============================================================
     # CONFIRM TRADE ENTRY
@@ -642,19 +564,36 @@ class ModerateMultiPairStrategy(IStrategy):
         side: str, **kwargs
     ) -> bool:
         """
-        Additional validation before entering trade.
+        Last check before an entry order is placed.
         """
-        # Check if we already have too many correlated positions
-        # (Simplified - in production, check correlation matrix)
-        open_trades = self.get_open_trades()
-        if len(open_trades) >= 3:
+
+        # The position limit is read from the config, NOT hardcoded.
+        #
+        # This used to be `if len(open_trades) >= 3`. That is the same number as
+        # max_open_trades, so it looked correct - but max_open_trades is a
+        # setting the operator can change in the bot's UI, and this line would
+        # have silently capped it. Raising the limit to 5 in the UI would have
+        # produced a bot that still refused the fourth trade, with the UI showing
+        # 5 and nothing anywhere saying why.
+        #
+        # max_open_trades is already enforced by freqtrade itself, so this check
+        # is a second gate. It exists so the reason is recorded, but it must read
+        # the same number the rest of the bot reads.
+        max_open_trades = self.config.get("max_open_trades", 3)
+        if max_open_trades != float("inf") and len(self.get_open_trades()) >= max_open_trades:
             return False
 
-        # Don't enter if spread is too wide
+        # Do not enter while the book is unusually wide.
+        #
+        # Measured spreads on these pairs are small - 0.004% on BTC/CAD, 0.045%
+        # on ETH/CAD - so 0.5% does not fire in normal conditions. It is a guard
+        # against the moments that are not normal: a thin CAD book during a
+        # violent move, where a resting order would be filled at a price that no
+        # longer reflects the market.
         ticker = self.dp.ticker(pair)
         if ticker:
             spread = (ticker["ask"] - ticker["bid"]) / ticker["bid"]
-            if spread > 0.005:  # 0.5% max spread
+            if spread > 0.005:
                 return False
 
         return True
@@ -668,20 +607,20 @@ class ModerateMultiPairStrategy(IStrategy):
         current_time: datetime, **kwargs
     ) -> bool:
         """
-        Additional validation before exiting trade.
+        Exits are never blocked, and that is the deliberate answer.
+
+        This method used to list four exit reasons and return True for each of
+        them, then return True at the end as well. Every possible input produced
+        the same result, so the branches did nothing except suggest that some
+        exits might be refused.
+
+        The rule this bot follows is the asymmetry the entry and exit signals
+        already encode: entries need several conditions to agree, exits need one.
+        A confirmation hook that could veto an exit would work against that, and
+        a vetoed stoploss is the single most expensive thing this file could do.
+        Returning True unconditionally is not an omission - it is the policy,
+        stated in one line instead of four.
         """
-        # Always allow stoploss exits
-        if exit_reason in ["stoploss", "trailing_stop_loss", "stoploss_on_exchange"]:
-            return True
-
-        # Allow ROI exits
-        if exit_reason == "roi":
-            return True
-
-        # Allow signal exits
-        if exit_reason == "exit_signal":
-            return True
-
         return True
 
     # ============================================================

@@ -117,7 +117,12 @@ jobs:
       # Runs the shipped strategy against a real DataFrame. This is the check
       # that would have caught the entry-signal crash before it reached a live
       # bot; static validation cannot see a runtime type error.
-      - name: Strategy actually executes and produces signals
+      #
+      # It now also runs against real Kraken daily candles and pins the shift(1)
+      # in the Donchian channel. A missing shift does not crash and does not look
+      # wrong - it makes every backtest better than the strategy can be, which is
+      # the most expensive kind of bug to ship.
+      - name: The strategy runs, fires, and does not read the future
         run: python3 ai_orchestrator/tests/test_strategy_runs.py
 
       # Runs the page's own renderBotControls() against a stub DOM, so the
@@ -157,7 +162,14 @@ jobs:
       # The timeframe, the ROI ladder (minutes) and the protections (candles)
       # use three different units. Changing one silently reinterprets the others,
       # with no error and no log line.
-      - name: The three time units agree
+      #
+      # This now checks BOTH files against each other, not just the strategy
+      # against the config's timeframe. It previously passed while three separate
+      # drifts were live, because freqtrade resolves these attributes with the
+      # precedence "Configuration, Strategy, default" - so a stale copy in the
+      # config silently wins, and the file an operator reads is not the file in
+      # force.
+      - name: Every time-dependent number agrees across both files
         run: python3 ai_orchestrator/tests/test_timeframe_units.py
 
       # "limit" does not mean maker. Only limit + price_side "same" rests on the

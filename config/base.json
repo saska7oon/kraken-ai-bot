@@ -97,24 +97,97 @@
     "position_adjustment_enable": false,
 
     // -------------------------------------------------------------------------
-    // RISK MANAGEMENT (moderate profile)
+    // RISK MANAGEMENT (moderate profile, sized for DAILY candles)
     // -------------------------------------------------------------------------
-    // stoploss is how much a single trade may lose before it is closed
-    // automatically. -0.08 means 8%.
-    "stoploss": -0.08,
+    // Every number in this block was originally chosen for 5-minute candles and
+    // was silently too tight once the timeframe moved to 1d. The reasoning is
+    // recorded per setting because "0.02" and "-0.08" look equally reasonable at
+    // any timeframe - they are not.
+    //
+    // THE MEASUREMENT THAT SETS THE STOP
+    //
+    // Average True Range over 14 days, measured from Kraken's own daily candles:
+    //
+    //     BTC/CAD   2.70%      2xATR =  5.4%
+    //     ETH/CAD   3.69%      2xATR =  7.4%
+    //     SOL/CAD   4.22%      2xATR =  8.4%
+    //     XRP/CAD   5.72%      2xATR = 11.4%
+    //
+    // ATR is how much the pair moves on an ordinary day. A stop tighter than
+    // that is not a risk limit, it is a coin flip: it gets hit by the normal
+    // daily range before the trade has room to work.
+    //
+    // The old -0.08 was 3.0xATR for BTC but only 1.4xATR for XRP - so on XRP it
+    // was inside the daily noise. -0.12 is at least 2.1xATR for all four pairs,
+    // which is the classic Turtle minimum, and it is the number RULE 2 in
+    // ai_orchestrator/plugins/strategy_generator.py allows (between -0.02 and
+    // -0.15).
+    //
+    // WHAT IT COSTS: -12% on one trade, with at most 3 trades open, is about
+    // -12% of the wallet if all three stop out together. At a measured 0.775
+    // average correlation between these pairs, a market-wide drop makes that
+    // plausible rather than theoretical, so treat -12% as a real scenario.
+    "stoploss": -0.12,
 
+    // Trailing stop: once a trade is up 10%, follow the price down no closer
+    // than 8% behind its peak, which locks in roughly +2% at worst.
+    //
+    // 0.02/0.03 were 5m values. On a daily candle a 2% trail is smaller than a
+    // single ordinary day's range on every one of these pairs, so it would have
+    // exited on the first quiet pullback - the exact opposite of letting a trend
+    // run. 8% is 1.4x-3.0xATR, wide enough to sit outside daily noise.
     "trailing_stop": true,
-    "trailing_stop_positive": 0.02,
-    "trailing_stop_positive_offset": 0.03,
+    "trailing_stop_positive": 0.08,
+    "trailing_stop_positive_offset": 0.10,
     "trailing_only_offset_is_reached": false,
 
-    // Profit targets: take 4% immediately, then relax over time so a trade is
-    // never held open forever waiting for a target that has passed.
+    // -------------------------------------------------------------------------
+    // PROFIT TARGETS - deliberately switched off
+    // -------------------------------------------------------------------------
+    // "0": 1.0 means "take profit at +100%". This is the single most important
+    // line for a trend-following strategy.
+    //
+    // WHY A TARGET THIS HIGH RATHER THAN A LOW ONE. A trend follower makes its
+    // money from a few large winners - that is the whole design. A 4% cap
+    // removes exactly the trades the strategy exists to catch, so the target has
+    // to sit above a normal trend rather than inside one. A doubling is a real
+    // level that crypto reaches in a strong run, so this stays a genuine safety
+    // net rather than a number chosen to never fire.
+    //
+    // It was briefly set to 100 (a 10,000% target) and the project's own
+    // validator rejected it:
+    //
+    //   minimal_roi_zero_too_large: "That means it wants to more than double the
+    //   money in a single trade. Targets like that essentially never happen and
+    //   are a sign the numbers were invented rather than tested."
+    //
+    // The rule caps the "0" target at 1.0, and it is a good rule - an
+    // unreachable number and a disabled setting look identical in a config file,
+    // and only one of them is honest.
+    //
+    // The old ladder was {"0": 0.04, "30": 0.02, "60": 0.01, "120": 0}. The keys
+    // are MINUTES since the trade opened, and a daily candle is 1440 of them.
+    // Read against 1d it said:
+    //
+    //     after    30 min (0.02 candles): need 2.0% profit
+    //     after    60 min (0.04 candles): need 1.0% profit
+    //     after   120 min (0.08 candles): need 0.0% profit
+    //
+    // So one twelfth of the way into the first candle, any position showing any
+    // profit at all would be closed. The bot would have sold every winner almost
+    // immediately and held only the losers - the precise inverse of what a trend
+    // follower is for. A 4% cap also cannot capture the moves this strategy
+    // exists to catch.
+    //
+    // This must be set HERE and not only in the strategy. Freqtrade resolves
+    // these attributes with the precedence "Configuration, Strategy, default"
+    // (freqtrade/resolvers/strategy_resolver.py::_override_attribute_helper), so
+    // a value in this file silently overrides whatever the strategy declares.
+    //
+    // Exits now come from three places instead: the Donchian breakdown, the
+    // trailing stop, and the stoploss.
     "minimal_roi": {
-        "0": 0.04,
-        "30": 0.02,
-        "60": 0.01,
-        "120": 0
+        "0": 1.0
     },
 
     // -------------------------------------------------------------------------
@@ -263,18 +336,33 @@
     // forever, the bot holds a stale view of the market, and the position is
     // neither entered nor abandoned.
     //
-    // 5 minutes is freqtrade's own default, kept because at a 1h timeframe a
-    // candle lasts an hour and a fill that has not happened in five minutes is
-    // unlikely to happen at that price. On timeout freqtrade cancels and
-    // re-evaluates on the next candle, which is the behaviour we want.
+    // THE UNIT IS MINUTES, AND THAT IS WHY THIS NUMBER CHANGED.
     //
-    // The cost of this choice is real and worth naming: a cancelled entry is a
-    // missed trade, so a maker-only bot trades less often than a taker one. That
-    // is the trade being made deliberately - fewer trades at half the fee, rather
-    // than more trades at double it.
+    // The previous value was 5, freqtrade's own default, chosen when the
+    // timeframe was 1h. At 1d a candle lasts 1440 minutes, so a 5-minute window
+    // is 0.35% of one candle - the bot would place a resting order and withdraw
+    // it again before the market had any real chance to come to it. Since the
+    // entry signal is only evaluated once a day, the next attempt would be 24
+    // hours later.
+    //
+    // With post-only orders this matters more than it would otherwise. Post Only
+    // means the order MUST rest - it is rejected if it would cross - so the
+    // timeout is the entire window in which a maker fill can happen. Five minutes
+    // of resting, once per day, would have produced a bot that almost never
+    // filled and would have looked like a strategy with no signals.
+    //
+    // 60 minutes gives a resting order a real chance without holding capital
+    // idle for most of a day. The trade-off is stated plainly: a longer timeout
+    // means capital is committed to an order that may not fill, and on timeout
+    // freqtrade cancels and re-evaluates at the next candle.
+    //
+    // exit_timeout_count 0 means an unfilled EXIT is retried indefinitely rather
+    // than abandoned. That asymmetry with entry is intentional: failing to enter
+    // costs an opportunity, failing to exit holds a position the strategy has
+    // already decided to leave.
     "unfilledtimeout": {
-        "entry": 5,
-        "exit": 5,
+        "entry": 60,
+        "exit": 60,
         "exit_timeout_count": 0,
         "unit": "minutes"
     },
@@ -329,17 +417,36 @@
     },
 
     // -------------------------------------------------------------------------
-    // TIMEFRAME
+    // TIMEFRAME - 1 day
     // -------------------------------------------------------------------------
-    // 1h, not 5m. See the fee block above and the strategy's `timeframe` for the
-    // arithmetic: Kraken Tier 1 charges 1.60% round trip, the mean BTC/CAD 5m
-    // candle moves 0.075%, and the mean 1h candle moves 0.650%. On 5m the price
-    // must move about 21 candles' worth to cover the fee; on 1h, about 2.5.
+    // 1d, not 5m and not 1h. See the fee block above and the strategy's
+    // `timeframe` for the arithmetic. Kraken Tier 1 charges 0.80% at maker and
+    // 1.60% round trip at taker; measured mean candle ranges are:
     //
-    // This must match the strategy's own `timeframe`. Freqtrade uses the
-    // strategy's value, so a mismatch here would be silently ignored rather than
-    // erroring - which is why both are set and a test checks they agree.
-    "timeframe": "1h",
+    //     pair       5m        1h        1d
+    //     BTC/CAD    0.075%    0.650%    3.37%
+    //     SOL/CAD    0.076%    0.914%    6.59%
+    //     XRP/CAD    0.110%    1.237%    6.06%
+    //
+    // On 5m the price had to move about 21 candles' worth to cover the fee. On
+    // 1d, BTC/CAD's fee is 0.24x a single candle's range.
+    //
+    // THIS VALUE WINS OVER THE STRATEGY'S. The previous comment here said the
+    // opposite - that freqtrade uses the strategy's value and a mismatch would
+    // be silently ignored. That was wrong, and it was the kind of wrong that
+    // hides: it was written next to a value that contradicted the strategy, and
+    // it told the reader not to worry about it.
+    //
+    // freqtrade/resolvers/strategy_resolver.py resolves these attributes with
+    // the precedence "Configuration, Strategy, default", and ("timeframe", None)
+    // is the second entry in that list. So this line was in force and the
+    // strategy's "1d" was being discarded - the bot would have run on hourly
+    // candles while every risk number in it (ROI keys, protection windows, the
+    // unfilled timeout) had been sized for daily ones.
+    //
+    // Both files now say "1d" and ai_orchestrator/tests/test_timeframe_units.py
+    // checks the config as well as the strategy, so this cannot drift again.
+    "timeframe": "1d",
     "process_only_new_candles": true,
 
     // -------------------------------------------------------------------------

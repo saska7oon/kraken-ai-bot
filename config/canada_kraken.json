@@ -120,10 +120,23 @@
     "db_url": "sqlite:////freqtrade/user_data/data/tradesv3.dryrun.sqlite",
 
     // -------------------------------------------------------------------------
-    // RISK (moderate profile)
+    // RISK (moderate profile, sized for DAILY candles)
     // -------------------------------------------------------------------------
-    // At most 3 trades at once. With 4 pairs tracked, the bot can never be
-    // fully invested in all of them, which keeps cash available.
+    // These four values are duplicated in config/base.json on purpose - both
+    // files are loaded and this one is applied second. They must stay identical
+    // or the bot's behaviour depends on file order. The full reasoning lives in
+    // base.json; the short version is that each was a 5-minute value:
+    //
+    //   stoploss -0.08 -> -0.12   measured daily ATR is 2.7%-5.7%, so -0.08 was
+    //                             only 1.4xATR on XRP - inside the daily noise.
+    //                             -0.12 clears 2xATR on all four pairs.
+    //   trail    0.02 -> 0.08     a 2% trail is under one ordinary day's range.
+    //   offset   0.03 -> 0.10     start trailing only after a real trend move.
+    //   roi      ladder -> {"0": 1.0}
+    //                             the old keys were MINUTES and a daily candle is
+    //                             1440 of them, so after 120 minutes the target
+    //                             was 0% and every winner was sold at once.
+    //                             Disabled so trends are not capped.
     "max_open_trades": 3,
     "stake_amount": "unlimited",
 
@@ -131,18 +144,15 @@
     "tradable_balance_ratio": 0.90,
     "amount_reserve_percent": 0.05,
 
-    "stoploss": -0.08,
+    "stoploss": -0.12,
 
     "trailing_stop": true,
-    "trailing_stop_positive": 0.02,
-    "trailing_stop_positive_offset": 0.03,
+    "trailing_stop_positive": 0.08,
+    "trailing_stop_positive_offset": 0.10,
     "trailing_only_offset_is_reached": false,
 
     "minimal_roi": {
-        "0": 0.04,
-        "30": 0.02,
-        "60": 0.01,
-        "120": 0
+        "0": 1.0
     },
 
     // -------------------------------------------------------------------------

@@ -18,16 +18,26 @@ error, and no test ever executed the code. A strategy that never runs is a
 strategy that is never wrong, which is how a fatal bug survives 48 green cases.
 
 So this test does the one thing that would have caught it: it imports the real
-strategy file, hands it a real DataFrame, and calls the two methods freqtrade
-calls. If they raise, the test fails with the traceback.
+strategy file, hands it a real DataFrame, and calls the methods freqtrade calls.
+If they raise, the test fails with the traceback.
 
-The stubs are deliberately faithful where it matters. `ta` and `qtpylib` are
-implemented with real pandas operations rather than returning constants, because
-the bug being guarded against is a pandas *type* error: a stub returning a bare
-list would reproduce it, and a stub returning a constant would hide it. The
-indicators only need to have the right shape and type, not the right values -
-the strategy's arithmetic is its own business, but whether its operands are
-Series is exactly what broke.
+What changed with the Donchian rewrite
+--------------------------------------
+This test used to build a DataFrame with the indicator columns pre-filled
+(ema_9, rsi, macd, bb_percent...) and call populate_entry_trend directly. That
+worked while the strategy read pre-computed columns, but it meant
+populate_indicators was never executed by any test - the half of the strategy
+that decides what the signals are computed FROM was untested.
+
+The strategy now derives its own channels, so this file calls
+populate_indicators first and feeds its output to the signal methods. The
+pipeline under test is the real one.
+
+The new check that matters most is the lookahead test. A Donchian channel must
+be the highest high of the candles BEFORE the current one. Building it without
+shift(1) - including the current candle in the maximum it is compared against -
+does not crash, does not look wrong, and makes every backtest better than the
+strategy can actually be. Section 4 pins that specific mistake.
 
 No freqtrade, talib or technical install is required; they are stubbed into
 sys.modules for the duration of the import.
@@ -47,8 +57,10 @@ STRATEGY = (
 
 #: Rows of synthetic candles. Must exceed the longest indicator period so the
 #: warm-up NaNs are present - a strategy that only works on warm data is not
-#: working.
-ROWS = 400
+#: working. The trend filter is a 200-day EMA, so this must be comfortably
+#: above 200 or every signal would be suppressed by the NaN guard and the test
+#: would report a broken strategy when the fixture was simply too short.
+ROWS = 700
 
 
 def _install_stubs() -> None:
@@ -68,9 +80,9 @@ def _install_stubs() -> None:
 
     class IStrategy:
         # The strategy reads these off itself; freqtrade would normally set them.
-        timeframe = "5m"
-        stoploss = -0.05
-        minimal_roi = {"0": 0.10}
+        timeframe = "1d"
+        stoploss = -0.12
+        minimal_roi = {"0": 100}
         startup_candle_count = 200
         process_only_new_candles = True
 
@@ -104,63 +116,50 @@ def _install_stubs() -> None:
         dn = (-d.clip(upper=0)).ewm(alpha=1 / int(timeperiod), adjust=False).mean()
         return 100 - (100 / (1 + up / dn.replace(0, np.nan)))
 
-    def MACD(df, fastperiod=12, slowperiod=26, signalperiod=9, **kw):
-        s = _series(df)
-        macd = EMA(s, fastperiod) - EMA(s, slowperiod)
-        sig = macd.ewm(span=int(signalperiod), adjust=False).mean()
-        return macd, sig, macd - sig
-
-    def ADX(df, timeperiod=14, **kw):
-        return pd.Series(25.0, index=df.index)
-
     def ATR(df, timeperiod=14, **kw):
-        return (df["high"] - df["low"]).rolling(int(timeperiod)).mean()
+        """Wilder's ATR, which is what talib computes - not a rolling mean.
 
-    def PLUS_DI(df, timeperiod=14, **kw):
-        return pd.Series(20.0, index=df.index)
+        The previous stub used a plain rolling mean of (high - low). That is a
+        different number, and since the stoploss rationale quotes measured ATR
+        values, a stub that does not match talib would make the test agree with
+        a figure the live bot never sees.
+        """
+        prev_close = df["close"].shift(1)
+        tr = pd.concat(
+            [
+                df["high"] - df["low"],
+                (df["high"] - prev_close).abs(),
+                (df["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        return tr.ewm(alpha=1 / int(timeperiod), adjust=False).mean()
 
-    def MINUS_DI(df, timeperiod=14, **kw):
-        return pd.Series(15.0, index=df.index)
-
-    def STOCHRSI(df, timeperiod=14, fastk_period=3, fastd_period=3, **kw):
-        r = RSI(df, timeperiod)
-        k = (r - r.rolling(int(fastk_period)).min()) / (
-            r.rolling(int(fastk_period)).max() - r.rolling(int(fastk_period)).min()
-        ) * 100
-        return k, k.rolling(int(fastd_period)).mean()
-
-    ta = types.ModuleType("talib.abstract")
-    ta.EMA, ta.RSI, ta.MACD, ta.ADX = EMA, RSI, MACD, ADX
-    ta.ATR, ta.PLUS_DI, ta.MINUS_DI, ta.STOCHRSI = ATR, PLUS_DI, MINUS_DI, STOCHRSI
-    ta.get = lambda name, *a, **kw: globals().get(name)
-    talib = types.ModuleType("talib")
-    talib.abstract = ta
-    sys.modules["talib"] = talib
-    sys.modules["talib.abstract"] = ta
+    ta = types.ModuleType("talib")
+    ta.abstract = types.ModuleType("talib.abstract")
+    for fn in (EMA, RSI, ATR):
+        setattr(ta.abstract, fn.__name__, fn)
+    sys.modules["talib"] = ta
+    sys.modules["talib.abstract"] = ta.abstract
 
     # ---- technical.qtpylib -------------------------------------------------
+    qtp = types.ModuleType("technical.qtpylib")
+
     def crossed_above(a, b):
-        a, b = pd.Series(a), pd.Series(b)
         return (a > b) & (a.shift(1) <= b.shift(1))
 
     def crossed_below(a, b):
-        a, b = pd.Series(a), pd.Series(b)
         return (a < b) & (a.shift(1) >= b.shift(1))
 
-    def bollinger_bands(s, std=2.0, **kw):
-        s = pd.Series(s)
-        mid = s.rolling(20).mean()
-        dev = s.rolling(20).std()
-        return mid + std * dev, mid, mid - std * dev
-
-    def typical_price(df):
-        return (df["high"] + df["low"] + df["close"]) / 3
-
+    qtp.crossed_above = crossed_above
+    qtp.crossed_below = crossed_below
+    qtp.bollinger_bands = lambda s, window=20, stds=2.0, **kw: {
+        "lower": s.rolling(int(window)).mean() - stds * s.rolling(int(window)).std(),
+        "mid": s.rolling(int(window)).mean(),
+        "upper": s.rolling(int(window)).mean() + stds * s.rolling(int(window)).std(),
+    }
+    qtp.typical_price = lambda df: (df["high"] + df["low"] + df["close"]) / 3
     tech = types.ModuleType("technical")
-    qtp = types.ModuleType("technical.qtpylib")
-    qtp.crossed_above, qtp.crossed_below = crossed_above, crossed_below
-    qtp.bollinger_bands, qtp.typical_price = bollinger_bands, typical_price
-    qtp.indicators = qtp
     tech.qtpylib = qtp
     sys.modules["technical"] = tech
     sys.modules["technical.qtpylib"] = qtp
@@ -173,108 +172,70 @@ def _load_strategy():
     return mod.ModerateMultiPairStrategy
 
 
-def _make_dataframe(seed: int = 20260917, phase: float = 12.0):
-    """Candles that actually trend and pull back, so both branches can fire.
+def _make_dataframe(seed: int = 20260917, phase: float = 12.0, rows: int = ROWS):
+    """Raw OHLCV candles that trend and pull back.
 
-    `seed` and `phase` vary the regime, so a condition can be judged across
-    more than one market shape rather than one lucky series.
+    Only OHLCV is produced. The indicator columns are deliberately NOT
+    pre-filled any more: populate_indicators is the thing under test, so filling
+    its output in by hand would test the signal methods against numbers the
+    strategy never computed.
+
+    `seed` and `phase` vary the regime, so a condition can be judged across more
+    than one market shape rather than one lucky series.
     """
     import numpy as np
     import pandas as pd
 
     rng = np.random.default_rng(seed)
-    idx = pd.date_range("2026-01-01", periods=ROWS, freq="5min")
-    # A slow cycle plus noise: guarantees both crossovers and oversold dips,
-    # so neither condition group is vacuously empty.
-    trend = np.sin(np.linspace(0, phase * np.pi, ROWS)) * 400
-    close = pd.Series(60000 + trend + rng.normal(0, 90, ROWS), index=idx)
-    high = close + rng.uniform(5, 60, ROWS)
-    low = close - rng.uniform(5, 60, ROWS)
-    vol = pd.Series(rng.uniform(80, 400, ROWS), index=idx)
+    idx = pd.date_range("2024-01-01", periods=rows, freq="D")
 
-    df = pd.DataFrame(
-        {"open": close.shift(1).fillna(close.iloc[0]), "high": high,
-         "low": low, "close": close, "volume": vol},
+    # A slow cycle plus noise. The cycle guarantees the series makes new highs
+    # (so the Donchian breakout is reachable) and new lows (so the exit is too).
+    trend = np.sin(np.linspace(0, phase * np.pi, rows)) * 8000
+    close = pd.Series(60000 + trend + rng.normal(0, 700, rows), index=idx)
+    # Highs and lows must straddle the close, or a "close above every prior
+    # high" test becomes impossible for fixture reasons.
+    high = close + rng.uniform(50, 900, rows)
+    low = close - rng.uniform(50, 900, rows)
+    vol = pd.Series(rng.uniform(80, 400, rows), index=idx)
+
+    return pd.DataFrame(
+        {
+            "open": close.shift(1).fillna(close.iloc[0]),
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": vol,
+        },
         index=idx,
     )
-    # The indicator columns populate_indicators would have produced.
-    df["ema_9"] = close.ewm(span=9, adjust=False).mean()
-    df["ema_21"] = close.ewm(span=21, adjust=False).mean()
-    df["rsi"] = 50 + 30 * np.sin(np.linspace(0, 10 * np.pi, ROWS))
-    df["macd"] = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
-    df["macdsignal"] = df["macd"].ewm(span=9, adjust=False).mean()
-    df["macdhist"] = df["macd"] - df["macdsignal"]
-    # ADX and the directional indicators must be *derived from the trend*, not
-    # drawn independently.
-    #
-    # Two earlier versions of this fixture failed here, in opposite directions.
-    # Constants (adx = 28, di_plus = 22) made the ADX condition vacuously true,
-    # so adx_enabled looked like a dead switch. Independent sine waves made it
-    # vary but never coincide with the other conditions, so a five-condition
-    # confluence entry fired zero times - a fixture that models no correlation
-    # cannot produce a confluence, and the strategy looked broken when it was
-    # the data that was.
-    #
-    # In a real market these are not independent: DI+ exceeds DI- while the
-    # short EMA is above the long one, and ADX rises with the distance between
-    # them. Modelling that is what makes "all five agree" a reachable state.
-    # ADX is a LAGGING measure of how strongly price has been moving - it is
-    # high in a strong downtrend as much as in a strong uptrend. Modelling it
-    # as a function of the current EMA spread got this exactly wrong: right
-    # after a crossover the spread is near zero, so ADX was always weakest at
-    # the precise candle the entry looks for, and the trend path could not fire
-    # at any RSI threshold.
-    #
-    # Deriving it from recent absolute movement instead means a cross that
-    # follows a decisive move still sees elevated ADX, which is what a real
-    # chart looks like.
-    moves = df["close"].pct_change().abs()
-    strength = (moves / moves.quantile(0.95)).clip(0, 1)
-    df["adx"] = 12 + 24 * strength.rolling(14, min_periods=1).mean().pow(0.5)
-    # DI+/DI- follow the trend direction but LAG it, because they are computed
-    # over a 14-period window. Making them track the EMA direction exactly -
-    # which is what this fixture did at first - makes "DI+ above DI-" a
-    # restatement of "the short EMA is above the long one", so the condition
-    # becomes redundant and adx_enabled can never change the outcome. A lagging
-    # DI is both more realistic and what keeps that switch meaningful.
-    up_now = (df["ema_9"] > df["ema_21"]).astype(float)
-    up_lagged = up_now.rolling(10, min_periods=1).mean()
-    df["di_plus"] = 14 + 16 * up_lagged
-    df["di_minus"] = 30 - 16 * up_lagged
-    # Must exceed volume_factor * 1.5 (1.5 * 1.5 = 2.25) on some candles,
-    # or the mean-reversion path is unreachable for fixture reasons.
-    df["volume_ratio"] = 1.2 + 1.6 * (np.sin(np.linspace(0, 20 * np.pi, ROWS)) + 1) / 2
-    df["bb_percent"] = (np.sin(np.linspace(0, 8 * np.pi, ROWS)) + 1) / 2
-    return df
 
 
-def _check(name, df, fn, sig_col, fired_paths=None):
-    """Call one signal method and check the signal column is well-formed."""
+def _analyse(strat, df):
+    """Run the real pipeline: indicators first, then the signal methods."""
+    out = strat.populate_indicators(df.copy(), {"pair": "BTC/CAD"})
+    out = strat.populate_entry_trend(out, {"pair": "BTC/CAD"})
+    out = strat.populate_exit_trend(out, {"pair": "BTC/CAD"})
+    return out
+
+
+def _check_signal(name, out, sig_col):
+    """Check one signal column is well-formed and actually fires."""
     problems = []
-    try:
-        out = fn(df.copy(), {"pair": "BTC/CAD"})
-    except Exception as e:
-        print(f"  FAIL  {name} raised {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        return [f"{name} raised {type(e).__name__}: {e}"]
-
     if sig_col not in out.columns:
-        problems.append(f"{name} did not create the {sig_col!r} column")
         print(f"  FAIL  no {sig_col!r} column produced")
-        return problems
+        return [f"{name} did not create the {sig_col!r} column"]
 
     sig = out[sig_col]
     n_on = int((sig == 1).sum())
-    if "enter_tag" in out.columns and sig_col == "enter_long":
-        tags = out.loc[sig == 1, "enter_tag"].value_counts().to_dict()
-        print(f"        entry paths that fired: {tags or 'none'}")
-        fired_paths.update(tags.keys())
     n_nan = int(sig.isna().sum())
     bad = sorted(set(sig.dropna().unique()) - {0, 1})
 
-    print(f"  ok    {name}: {sig_col} has {n_on} signal(s) out of {len(sig)} rows, "
-          f"{n_nan} NaN")
+    if sig_col == "enter_long" and "enter_tag" in out.columns:
+        tags = out.loc[sig == 1, "enter_tag"].value_counts().to_dict()
+        print(f"        entry tags: {tags or 'none'}")
+
+    print(f"  ok    {name}: {n_on} signal(s) of {len(sig)} rows, {n_nan} NaN")
 
     if n_nan:
         problems.append(
@@ -285,47 +246,123 @@ def _check(name, df, fn, sig_col, fired_paths=None):
         problems.append(f"{name}: {sig_col} contains non-0/1 values: {bad}")
     if n_on == 0:
         problems.append(
-            f"{name}: never fired on {len(sig)} synthetic candles that were built "
-            "to trigger it. Either the logic is unreachable or the test data is "
-            "wrong - both need looking at."
+            f"{name}: never fired on {len(sig)} candles built to trigger it. "
+            "Either the logic is unreachable or the fixture is wrong - both need "
+            "looking at."
         )
     return problems
 
 
-def _check_switches(strat, df, cls) -> list:
-    """Every *_enabled switch must actually change the outcome.
+def _check_lookahead(strat):
+    """The channel must be built from PRIOR candles, not the current one.
 
-    The exit block used to drop conditions[2] and beyond, which meant the MACD
-    and Bollinger exit switches were connected to nothing. The operator could
-    turn an exit off and see no change at all - a setting that appears to work
-    is more dangerous than one that is visibly missing, because it is trusted.
-    So: flip each switch, and require the signal count to move.
+    This is the decisive test for the shift(1) in populate_indicators, and it is
+    constructed so that the two implementations give different answers on the
+    same candle.
+
+    A Donchian entry asks "did today close above every high that came before it".
+    The wrong version asks "did today close above every high including today's".
+    Those differ only when today's high is above today's close - which is almost
+    every candle. So on a candle where the close is above all PRIOR highs but
+    below the CURRENT high:
+
+        correct (shift(1))  -> donchian_high is the prior high, close > it, FIRES
+        wrong   (no shift)  -> donchian_high is today's high, close < it, silent
+
+    The fixture below builds exactly that candle, so a missing shift(1) fails
+    here rather than quietly inflating every backtest.
+    """
+    import numpy as np
+    import pandas as pd
+
+    problems = []
+    rows = 260
+    idx = pd.date_range("2024-01-01", periods=rows, freq="D")
+
+    # A flat base, then a clear step up on the final candle.
+    close = np.full(rows, 100.0)
+    high = np.full(rows, 101.0)
+    low = np.full(rows, 99.0)
+    # Final candle: closes above every prior high (101.0) but its own high is
+    # higher still, at 110. Correct logic sees a breakout; lookahead does not.
+    close[-1] = 105.0
+    high[-1] = 110.0
+    low[-1] = 104.0
+
+    df = pd.DataFrame(
+        {
+            "open": np.concatenate([[100.0], close[:-1]]),
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": np.full(rows, 100.0),
+        },
+        index=idx,
+    )
+
+    out = strat.populate_indicators(df, {"pair": "BTC/CAD"})
+    ch = out["donchian_high"].iloc[-1]
+    ch_expected = 101.0
+    fired = bool(out["donchian_high"].iloc[-1] < out["close"].iloc[-1])
+
+    print(f"  --    final candle: close=105.0, own high=110.0, prior high=101.0")
+    print(f"        donchian_high computed as {ch:.2f} (want {ch_expected:.2f})")
+
+    if not np.isclose(ch, ch_expected):
+        problems.append(
+            f"donchian_high on the final candle is {ch:.2f}, expected {ch_expected:.2f} "
+            "(the highest high of the PREVIOUS 20 candles). If it equals 110.0 the "
+            "current candle is included in its own channel - a lookahead that makes "
+            "backtests better than reality."
+        )
+        print(f"  FAIL  donchian_high includes the current candle")
+
+    if not fired:
+        problems.append(
+            "the breakout did not register on a candle that closed above every "
+            "prior high - the channel is looking at the wrong candles"
+        )
+        print("  FAIL  breakout did not fire")
+    else:
+        print("  ok    breakout fires on a close above the PRIOR high only")
+
+    # And the guard that stops the wrong answer being reachable by accident:
+    # a close exactly equal to the channel must not count as a breakout, or the
+    # strategy fires on every flat candle.
+    df2 = df.copy()
+    df2.loc[df2.index[-1], "close"] = 101.0
+    df2.loc[df2.index[-1], "high"] = 101.0
+    out2 = strat.populate_indicators(df2, {"pair": "BTC/CAD"})
+    tie = out2["donchian_high"].iloc[-1] < out2["close"].iloc[-1]
+    if tie:
+        problems.append("a close exactly at the prior high counted as a breakout")
+        print("  FAIL  a tie counted as a breakout")
+    else:
+        print("  ok    a close exactly at the prior high is not a breakout")
+
+    return problems
+
+
+def _check_parameters_bind(strat, cls) -> list:
+    """Changing a window must change the outcome.
+
+    The previous version of this check flipped the *_enabled switches, which
+    gated conditions that no longer exist. The equivalent question for a
+    Donchian strategy is whether the window lengths are actually read: a
+    parameter wired to nothing is a setting that appears to work, which is more
+    dangerous than one that is visibly missing because it is trusted.
     """
     problems = []
     print()
-    print("  Configured switches actually do something (across 4 market shapes):")
-    cases = [
-        ("sell_bb_enabled", "exit_long", strat.populate_exit_trend),
-        ("sell_macd_enabled", "exit_long", strat.populate_exit_trend),
-        ("sell_rsi_enabled", "exit_long", strat.populate_exit_trend),
-        # The buy-side toggles matter for the same reason. Note the direction
-        # differs: turning a buy condition OFF relaxes the AND, so it should
-        # produce *more* entries, not fewer. Either movement is a pass; no
-        # movement is a dead switch.
-        ("buy_macd_enabled", "enter_long", strat.populate_entry_trend),
-        ("buy_bb_enabled", "enter_long", strat.populate_entry_trend),
-        ("buy_rsi_enabled", "enter_long", strat.populate_entry_trend),
-        ("adx_enabled", "enter_long", strat.populate_entry_trend),
-        ("volume_enabled", "enter_long", strat.populate_entry_trend),
-    ]
+    print("  Window parameters actually change the result (across 3 regimes):")
+
     regimes = [
         _make_dataframe(seed=20260917, phase=12.0),
         _make_dataframe(seed=7, phase=9.0),
         _make_dataframe(seed=99, phase=15.0),
-        _make_dataframe(seed=4242, phase=6.0),
     ]
 
-    for attr, col, fn in cases:
+    for attr in ("entry_window", "exit_window", "trend_filter_window"):
         param = getattr(cls, attr, None)
         if param is None:
             print(f"    --    {attr} not present, skipped")
@@ -335,102 +372,181 @@ def _check_switches(strat, df, cls) -> list:
         sample = ""
         try:
             for i, regime in enumerate(regimes):
-                param.value = True
-                on = int((fn(regime.copy(), {"pair": "BTC/CAD"})[col] == 1).sum())
-                param.value = False
-                off = int((fn(regime.copy(), {"pair": "BTC/CAD"})[col] == 1).sum())
-                if on != off:
+                results = []
+                for val in (10, 40, 200):
+                    param.value = val
+                    out = _analyse(strat, regime)
+                    results.append(
+                        int((out["enter_long"] == 1).sum())
+                        + int((out["exit_long"] == 1).sum())
+                    )
+                if len(set(results)) > 1:
                     moved += 1
                     if not sample:
-                        sample = f"e.g. {on} -> {off} on shape {i + 1}"
+                        sample = f"e.g. 10/40/200 -> {results} on shape {i + 1}"
         finally:
             param.value = original
 
-        # A condition that is correctly wired can still fail to bind on any one
-        # dataset, because another condition already excludes those candles. So
-        # the test asks whether the switch moves the outcome on ANY shape. Only
-        # a switch that never moves it - which is what the dropped-conditions
-        # bug produced - is dead.
-        mark = "ok   " if moved else "FAIL "
-        print(f"    {mark} {attr:20} moved on {moved}/{len(regimes)} shapes  {sample}")
-        if not moved:
+        if moved:
+            print(f"    ok    {attr} changes the result on {moved}/3 shapes ({sample})")
+        else:
             problems.append(
-                f"{attr} changed nothing on any of {len(regimes)} market shapes: "
-                "the switch is not wired to the signal it claims to control."
+                f"{attr} made no difference on any of 3 market shapes - it is "
+                "wired to nothing"
             )
+            print(f"    FAIL  {attr} never changes the result")
+
     return problems
 
 
-def _check_reachability(strat, cls) -> list:
-    """Every entry path must be reachable on at least one market shape.
+def _check_real_data(strat) -> list:
+    """Run on real Kraken daily candles, not just synthetic ones.
 
-    The trend path once required an EMA crossover AND a MACD crossover on the
-    same candle, which fired zero times on every shape: the strategy was
-    described as trend-following and was in practice mean-reversion only.
+    Synthetic data proves the code runs. It cannot prove the strategy fires on a
+    real market, because the fixture was written by the same person who wrote
+    the logic and can encode the same wrong assumption. This fetches actual
+    candles and reports what the strategy does with them.
 
-    Reachability is asserted rather than a per-shape count, because five ANDed
-    conditions make a trend entry genuinely uncommon and some shapes will
-    legitimately produce none. What must never happen is a path that is
-    unreachable everywhere - which is exactly what the bug produced.
+    A network failure is reported as a skip, not a failure - the test suite must
+    still run without internet access.
     """
-    problems = []
+    import json
+    import urllib.request
+
     print()
-    print("  Entry paths reachable across market shapes:")
-    shapes = [(20260917, 12.0), (7, 9.0), (99, 15.0), (4242, 6.0), (1234, 18.0)]
-    seen: dict = {}
-    for seed, phase in shapes:
-        d = _make_dataframe(seed=seed, phase=phase)
-        out = strat.populate_entry_trend(d.copy(), {"pair": "BTC/CAD"})
-        tags = out.loc[out["enter_long"] == 1, "enter_tag"].value_counts().to_dict()
-        for k, v in tags.items():
-            seen[k] = seen.get(k, 0) + v
-    print(f"        totals across {len(shapes)} shapes: {seen or 'none'}")
-    for path in ("trend_follow", "mean_reversion"):
-        mark = "ok   " if seen.get(path) else "FAIL "
-        print(f"    {mark} {path:18} {seen.get(path, 0)} signal(s)")
-        if not seen.get(path):
-            problems.append(
-                f"entry path {path!r} never fired on any of {len(shapes)} market "
-                "shapes - that path is unreachable."
-            )
+    print("  Real Kraken daily candles (721 per pair, about two years):")
+
+    problems = []
+    pairs = {
+        "BTC/CAD": "XXBTZCAD",
+        "ETH/CAD": "XETHZCAD",
+        "SOL/CAD": "SOLCAD",
+        "XRP/CAD": "XXRPZCAD",
+    }
+
+    import pandas as pd
+
+    for label, kraken_id in pairs.items():
+        url = (
+            "https://api.kraken.com/0/public/OHLC"
+            f"?pair={kraken_id}&interval=1440"
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                payload = json.load(resp)
+        except Exception as exc:
+            print(f"    --    {label}: skipped ({type(exc).__name__})")
+            continue
+
+        if payload.get("error"):
+            print(f"    --    {label}: skipped ({payload['error']})")
+            continue
+
+        key = [k for k in payload["result"] if k != "last"][0]
+        rows = payload["result"][key]
+        df = pd.DataFrame(
+            {
+                "open": [float(r[1]) for r in rows],
+                "high": [float(r[2]) for r in rows],
+                "low": [float(r[3]) for r in rows],
+                "close": [float(r[4]) for r in rows],
+                "volume": [float(r[6]) for r in rows],
+            },
+            index=pd.to_datetime([int(r[0]) for r in rows], unit="s"),
+        )
+
+        out = _analyse(strat, df)
+        entries = int((out["enter_long"] == 1).sum())
+        exits = int((out["exit_long"] == 1).sum())
+        warm = int(out["donchian_high"].isna().sum())
+        atr = out["atr_percent"].iloc[-1]
+
+        print(
+            f"    ok    {label:9} {len(df):>4} candles, {entries:>2} entries, "
+            f"{exits:>2} exits, ATR {atr:>5.2f}%"
+        )
+
+        if warm == 0:
+            problems.append(f"{label}: no warm-up NaN in donchian_high")
+
     return problems
 
 
 def main() -> int:
-    print("Strategy executes end to end (entry and exit signals):")
-    if not STRATEGY.exists():
-        print(f"FAIL - strategy not found at {STRATEGY}")
-        return 1
+    print("=" * 72)
+    print("THE STRATEGY ACTUALLY RUNS")
+    print("=" * 72)
 
     _install_stubs()
+    cls = _load_strategy()
+    strat = cls(config={"max_open_trades": 3})
+
+    problems: list[str] = []
+
+    print()
+    print("1. Indicators build, and the pipeline runs end to end:")
+    df = _make_dataframe()
     try:
-        cls = _load_strategy()
+        out = _analyse(strat, df)
     except Exception as e:
-        print(f"  FAIL  importing the strategy raised {type(e).__name__}: {e}")
         import traceback
+
+        print(f"  FAIL  the pipeline raised {type(e).__name__}: {e}")
         traceback.print_exc()
         return 1
 
-    strat = cls(config={"stake_currency": "CAD"})
-    df = _make_dataframe()
-    fired_paths: set = set()
-
-    problems = []
-    problems += _check("populate_entry_trend", df, strat.populate_entry_trend,
-                       "enter_long", fired_paths)
-    problems += _check("populate_exit_trend", df, strat.populate_exit_trend, "exit_long")
-    problems += _check_reachability(strat, cls)
-    problems += _check_switches(strat, df, cls)
+    for col in ("donchian_high", "donchian_low", "ema_trend", "atr", "atr_percent"):
+        present = col in out.columns
+        print(f"  {'ok  ' if present else 'FAIL'}  {col} present")
+        if not present:
+            problems.append(f"populate_indicators did not produce {col!r}")
 
     print()
+    print("2. Signal columns are well-formed and reachable:")
+    problems += _check_signal("populate_entry_trend", out, "enter_long")
+    problems += _check_signal("populate_exit_trend", out, "exit_long")
+
+    print()
+    print("2b. Every column plot_config names actually exists:")
+    # plot_config named ema_9, ema_21, ema_50, ema_200, bb_lowerband, macd, rsi
+    # and stoch_rsi_k after the Donchian rewrite removed all of them. FreqUI
+    # would have drawn empty panels for an indicator set the strategy no longer
+    # computes, which reads as a broken chart rather than a stale config - and
+    # nothing errored, because a plot name is just a string.
+    plot_cols = []
+    for section in ("main_plot", "subplots"):
+        for group, spec in (cls.plot_config.get(section) or {}).items():
+            if section == "main_plot":
+                plot_cols.append(group)
+            else:
+                plot_cols.extend(spec.keys() if isinstance(spec, dict) else [])
+    missing = sorted({c for c in plot_cols if c not in out.columns})
+    print(f"  {'ok  ' if not missing else 'FAIL'}  {len(plot_cols)} plotted column(s), "
+          f"{len(missing)} missing")
+    if missing:
+        print(f"        missing: {missing}")
+        problems.append(
+            f"plot_config names columns the strategy does not produce: {missing}. "
+            "FreqUI would show empty panels."
+        )
+
+    print()
+    print("3. The channel is built from PRIOR candles (no lookahead):")
+    problems += _check_lookahead(strat)
+
+    problems += _check_parameters_bind(strat, cls)
+    problems += _check_real_data(strat)
+
+    print()
+    print("=" * 72)
     if problems:
         print(f"FAILED - {len(problems)} problem(s)")
         for p in problems:
             print(f"  - {p}")
         return 1
-    print("PASSED - the strategy runs and produces usable signals")
+    print("PASSED - the strategy runs, fires, and does not read the future")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

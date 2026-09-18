@@ -244,14 +244,39 @@ DERIVED_KEYS: Tuple[str, ...] = ("db_url",)
 #: was the one thing that table had and this did not, and dropping it would have
 #: silently stopped the assistant setting a trailing stop at all.
 RISK_PRESETS: Dict[str, Dict[str, Any]] = {
+    # SIZED FOR DAILY CANDLES. Every stoploss and trailing distance below was
+    # originally a 5-minute value, and all three were too tight once the
+    # timeframe moved to 1d - to the point of being meaningless rather than
+    # merely suboptimal.
+    #
+    # The yardstick is ATR, measured from Kraken's own daily candles:
+    #
+    #     BTC/CAD  2.70%      ETH/CAD  3.69%      SOL/CAD  4.22%      XRP/CAD  5.72%
+    #
+    # A stop tighter than one ATR is not a risk limit. It is a bet that the next
+    # day is quieter than average, and it loses that bet often enough that the
+    # strategy never gets to be right about direction. The old Conservative
+    # -0.04 was 0.70xATR on XRP: it would have been hit by an ordinary day.
+    #
+    # The three levels now sit at roughly 1.8x, 2.1x and 2.6x the highest-ATR
+    # pair, so the label means the same thing on all four markets.
+    #
+    # -0.15 is also the floor RULE 2 allows
+    # (ai_orchestrator/plugins/strategy_generator.py: "a plain numeric stoploss
+    # between -0.02 and -0.15"), so Aggressive is at the permitted limit rather
+    # than beyond it.
+    #
+    # The trailing distances moved with them, and the ordering is deliberate:
+    # the trail is always tighter than the stop, because it only engages after
+    # the trade is already in profit.
     "conservative": {
         "label": "Conservative",
         "blurb": "Fewer positions, tighter stop loss. Slower, and much harder to hurt.",
         "values": {
             "max_open_trades": 2,
-            "stoploss": -0.04,
+            "stoploss": -0.10,
             "tradable_balance_ratio": 0.50,
-            "trailing_stop_positive": 0.015,
+            "trailing_stop_positive": 0.06,
         },
     },
     "moderate": {
@@ -259,9 +284,9 @@ RISK_PRESETS: Dict[str, Dict[str, Any]] = {
         "blurb": "The default. A middle ground between missing moves and taking damage.",
         "values": {
             "max_open_trades": 3,
-            "stoploss": -0.08,
+            "stoploss": -0.12,
             "tradable_balance_ratio": 0.90,
-            "trailing_stop_positive": 0.02,
+            "trailing_stop_positive": 0.08,
         },
     },
     "aggressive": {
@@ -271,7 +296,7 @@ RISK_PRESETS: Dict[str, Dict[str, Any]] = {
             "max_open_trades": 5,
             "stoploss": -0.15,
             "tradable_balance_ratio": 0.95,
-            "trailing_stop_positive": 0.03,
+            "trailing_stop_positive": 0.10,
         },
     },
 }
