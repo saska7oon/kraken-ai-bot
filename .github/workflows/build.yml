@@ -149,6 +149,11 @@ jobs:
       - name: Strategy changes wait for open positions
         run: python3 ai_orchestrator/tests/test_strategy_switch.py
 
+      # A wrong fee produces no error, just flattering numbers. Nothing else
+      # checks that simulation is charged what Kraken actually charges.
+      - name: Simulated trading is charged the real fee
+        run: python3 ai_orchestrator/tests/test_fees.py
+
       - name: Configuration preflight
         run: python3 tools/preflight_config.py
 

@@ -118,6 +118,51 @@
     },
 
     // -------------------------------------------------------------------------
+    // FEES
+    // -------------------------------------------------------------------------
+    // 0.80% is Kraken's Tier 1 taker rate, applied to each side of a trade, so a
+    // round trip costs about 1.60%.
+    //
+    // THIS NUMBER WAS NOT SET BEFORE, AND THE DEFAULT WAS WRONG.
+    //
+    // With no `fee` here, Freqtrade asks ccxt for the exchange's rate:
+    //
+    //     freqtrade/exchange/exchange.py, get_fee():
+    //         return self._api.calculate_fee(...)["rate"]
+    //
+    // ccxt reads it from the market's `taker` field, which Kraken's API returns
+    // EMPTY - verified live, `"fees": []` and `"fees_maker": []` on XBTCAD. ccxt
+    // therefore falls back to a hardcoded default of 0.0026 taker / 0.0016 maker,
+    // which is roughly a third of what Kraken actually charges a Tier 1 account.
+    //
+    // Kraken's published schedule (kraken.com/ca/features/fee-schedule):
+    //     Tier 1, $0+ 30-day volume:  maker 0.40%   taker 0.80%
+    //     Tier 2, $2.5K+:             maker 0.30%   taker 0.60%
+    // CAD pairs follow the same schedule as every other pair.
+    //
+    // So every simulated result before this change assumed 0.52% round trip
+    // instead of 1.60%, and was therefore about three times too optimistic. On a
+    // 5-minute timeframe that difference is not a detail: the average BTC/CAD 5m
+    // candle moves 0.076% in total, so 1.60% of fees is roughly 21 candles' worth
+    // of movement to break even.
+    //
+    // Taker rather than maker, deliberately. The bot places limit orders, which
+    // CAN earn the maker rate - but price_side "same" puts them at the touch of
+    // the book, where they often fill immediately and are charged as taker.
+    // Assuming the better rate would repeat the same mistake in the opposite
+    // direction: a simulation that flatters the strategy.
+    //
+    // Only affects simulation. Freqtrade honours this key ONLY in dry run:
+    //
+    //     if self._config["dry_run"] and self._config.get("fee", None) is not None:
+    //         return self._config["fee"]
+    //
+    // In live trading the real fee comes back on the order itself, which is more
+    // accurate than any number set here.
+    // -------------------------------------------------------------------------
+    "fee": 0.008,
+
+    // -------------------------------------------------------------------------
     // PRICING
     // -------------------------------------------------------------------------
     // entry_pricing and exit_pricing are REQUIRED keys. They are listed in
