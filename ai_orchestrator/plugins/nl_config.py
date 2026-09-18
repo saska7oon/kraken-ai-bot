@@ -187,6 +187,13 @@ APPROVABLE_CHANGE_TYPES = frozenset(
 # approval gate a generic "run any plugin" button.
 PLUGIN_RUN_CHANGE_TYPES = frozenset({"trigger"})
 
+#: Editable settings that this plugin may propose but must never write.
+#:
+#: `strategy` is here because changing it is conditional: it may only take effect
+#: when no positions are open, and only the settings route knows how to wait for
+#: that. Writing it from chat would apply it on the next reload regardless, taking
+#: over the exits of open trades.
+PLUGIN_UNWRITABLE_KEYS = frozenset({"strategy"})
 BOT_CONTROL_ACTIONS = frozenset({"pause", "resume"})
 
 # A strategy name ends up in the Swarm config, so it must look like a Python
@@ -1200,17 +1207,16 @@ Examples:
             #                running bot and the operator had to hand-edit a
             #                Swarm config.
             #
-            #   "redeploy" - genuinely needs a redeploy. The strategy is set by
-            #                a --strategy command-line argument, and Freqtrade's
-            #                `_process_common_options` overwrites the config
-            #                value with it:
-            #                    if self.args.get("strategy") or not config.get(...):
-            #                        config.update({"strategy": self.args.get("strategy")})
-            #                So a strategy written into the settings file would be
-            #                silently ignored. Claiming otherwise would be worse
-            #                than the old message, because the operator would
-            #                approve a change, see success, and get nothing.
-            "applies_via": "redeploy" if key == "strategy" else "settings",
+            #   "settings_page" - changeable, but only from the Settings page,
+            #                and not from chat. The strategy is the case: it may
+            #                only take effect when no positions are open, and only
+            #                the settings route can wait for that. This used to be
+            #                "redeploy", because the stack passed --strategy and
+            #                Freqtrade lets that argument override every config
+            #                file, so a strategy in the settings file did nothing.
+            #                That flag has been removed, which is what made runtime
+            #                switching possible at all.
+            "applies_via": "settings_page" if key == "strategy" else "settings",
             "plain_language": "",
         }
 
@@ -1348,13 +1354,14 @@ Examples:
                 "Nothing changes unless you approve.",
             ]
 
-        if any(c.get("applies_via") == "redeploy" for c in changes):
+        if any(c.get("applies_via") == "settings_page" for c in changes):
             lines += [
                 "",
-                "One of these cannot be applied to a running bot: the strategy is set",
-                "by a command-line argument, which overrides the config, so it needs a",
-                "redeploy. Approving it records your decision and tells you the value",
-                "to set; nothing changes until you redeploy.",
+                "The strategy is changed on the Settings page, not from chat, because",
+                "it can only take effect when no positions are open. If any are open,",
+                "the bot stops opening new ones and switches by itself once the last",
+                "one closes. Approving here records your decision; open Settings to",
+                "apply it.",
             ]
 
         if proposal is not None:
@@ -1402,24 +1409,39 @@ Examples:
         key = change.get("key")
         value = change.get("value")
 
+        # Keys the operator can change, but not from here.
+        #
+        # `strategy` became editable when runtime switching was added - so the
+        # allowlist check below no longer excludes it, and without this an
+        # approved strategy change would be written straight to the settings file
+        # by the chat, bypassing the queue. It would then take effect on the next
+        # reload while positions were open, which is exactly what the queue exists
+        # to prevent: the new strategy would inherit the exits of trades it never
+        # opened.
+        #
+        # The chat may still PROPOSE a strategy change - that is useful, and the
+        # operator approves it in the place where the queue can see it.
+        if isinstance(key, str) and key in PLUGIN_UNWRITABLE_KEYS:
+            return {
+                "change": change,
+                "status": "refused",
+                "reason": (
+                    "The strategy can be changed on the Settings page, but not from "
+                    "chat. Changing it takes effect only when no positions are open, "
+                    "and the Settings page is where that can be waited for properly. "
+                    "Your decision has been recorded - open Settings to apply it."
+                ),
+            }
+
         if not isinstance(key, str) or key not in settings_store.EDITABLE_BY_KEY:
-            # The allowlist is the second gate, and `strategy` is the case that
-            # makes it load-bearing: `_validate_change` permits it, but it cannot
-            # be applied here, because the stack passes --strategy and Freqtrade
-            # overwrites the config value with that argument.
             self.logger.error(
                 "Refused an approved config change to non-editable key %r", key
             )
-            if change.get("applies_via") == "redeploy":
-                reason = (
-                    "The strategy is set by a command-line argument, which "
-                    "overrides the configuration, so it cannot be changed on a "
-                    "running bot. Change the --strategy argument in the stack and "
-                    "redeploy. Your decision has been recorded."
-                )
-            else:
-                reason = "%s is not a setting that can be changed here." % key
-            return {"change": change, "status": "refused", "reason": reason}
+            return {
+                "change": change,
+                "status": "refused",
+                "reason": "%s is not a setting that can be changed here." % key,
+            }
 
         try:
             clean = settings_store.validate({key: value})

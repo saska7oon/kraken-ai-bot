@@ -90,8 +90,21 @@ services:
       # creates it before freqtrade runs.
       - --config
       - /freqtrade/user_data/runtime/runtime_settings.json
-      - --strategy
-      - ModerateMultiPairStrategy
+      # NO --strategy HERE, DELIBERATELY.
+      #
+      # This used to pass --strategy ModerateMultiPairStrategy. That flag was the
+      # only reason changing the strategy needed a stack redeploy: Freqtrade
+      # overrides every config file with a --strategy command-line argument
+      # (configuration.py, _process_common_options), so a strategy set in the
+      # writable settings layer was silently ignored on every reload.
+      #
+      # The strategy now comes from the configs, where runtime_settings.json -
+      # passed last, so it wins - can change it. Switching strategy is a setting
+      # change with a reload, not a redeploy.
+      #
+      # Do not add it back. A test asserts it is absent, because its return would
+      # break strategy switching silently: the setting would save, the reload
+      # would succeed, and the old strategy would keep running.
       - --strategy-path
       - /freqtrade/user_data/strategies
 

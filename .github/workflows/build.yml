@@ -143,6 +143,12 @@ jobs:
       - name: A risk level means one thing
         run: python3 ai_orchestrator/tests/test_risk_levels.py
 
+      # A strategy change with positions open must queue, not apply: a new
+      # strategy taking over the exits of trades it never opened is a decision
+      # nobody made.
+      - name: Strategy changes wait for open positions
+        run: python3 ai_orchestrator/tests/test_strategy_switch.py
+
       - name: Configuration preflight
         run: python3 tools/preflight_config.py
 

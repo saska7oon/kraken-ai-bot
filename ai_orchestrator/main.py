@@ -46,7 +46,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from ai_orchestrator.core.audit_logger import AuditLogger
-from ai_orchestrator.core import dryrun_reset, settings_store
+from ai_orchestrator.core import dryrun_reset, settings_store, strategy_switch
 from ai_orchestrator.core.freqtrade_api import (
     FreqtradeAPIClient,
     FreqtradeAPIError,
@@ -222,6 +222,10 @@ async def require_api_token(
 async def lifespan(app: FastAPI):
     global openrouter_client, freqtrade_client, audit_logger, plugin_manager
 
+    # Bound before anything can fail, so the shutdown path below can always refer
+    # to it even if startup died earlier.
+    strategy_queue_task = None
+
     logger.info("Starting AI Orchestrator...")
 
     if not API_TOKEN:
@@ -311,9 +315,21 @@ async def lifespan(app: FastAPI):
         )
 
     logger.info("AI Orchestrator started")
+
+    # Drains the queued-strategy file once open positions close. Started even when
+    # Freqtrade was unreachable above: the queue is a file on disk, and a change
+    # queued before an outage should still apply after it.
+    strategy_queue_task = asyncio.create_task(_strategy_queue_loop(freqtrade_client))
+
     yield
 
     logger.info("Shutting down AI Orchestrator...")
+    if strategy_queue_task:
+        strategy_queue_task.cancel()
+        try:
+            await strategy_queue_task
+        except asyncio.CancelledError:
+            pass
     if plugin_manager:
         await plugin_manager.shutdown()
     if openrouter_client:
@@ -321,6 +337,70 @@ async def lifespan(app: FastAPI):
     if freqtrade_client:
         await freqtrade_client.close()
     logger.info("AI Orchestrator shut down")
+
+
+#: How often to check whether a queued strategy change can be applied. The queue
+#: only drains when the last open position closes, which happens on the strategy's
+#: own timeframe - minutes, not seconds. A minute is responsive without adding
+#: load: each check is one status call.
+STRATEGY_QUEUE_INTERVAL_SECS = 60
+
+
+async def _strategy_queue_loop(freqtrade_client) -> None:
+    """Apply a queued strategy change once the open positions have closed.
+
+    This is what makes the queue a queue rather than a refusal. Without it a
+    queued change would sit in the file forever and the operator would be left
+    waiting for something that was never going to happen - which is worse than
+    being told no, because a wait looks like it might end.
+
+    Only ever acts when something is queued, so an idle bot does no extra work
+    beyond reading one small file per minute.
+    """
+    while True:
+        try:
+            await asyncio.sleep(STRATEGY_QUEUE_INTERVAL_SECS)
+
+            if strategy_switch.pending() is None:
+                continue
+
+            try:
+                status = await freqtrade_client.status()
+                open_trades = status.open_trades_count
+            except FreqtradeAPIError as e:
+                # Cannot see the positions, so cannot know it is safe. Leave the
+                # queue alone and try again next tick.
+                logger.warning("Could not check open trades for the queued strategy: %s", e)
+                continue
+
+            result = await strategy_switch.reconcile(
+                open_trades=open_trades, freqtrade=freqtrade_client
+            )
+            if not result:
+                continue
+
+            logger.info("Queued strategy change: %s", result)
+            try:
+                await audit_log.record(
+                    plugin="settings",
+                    action="strategy_switch_applied",
+                    user_initiated=True,
+                    input_data={"open_trades_before": open_trades},
+                    output_data=result,
+                    decision_reasoning=(
+                        "Open positions closed; the queued strategy change was "
+                        "applied and the bot restarted."
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not audit the applied strategy change: %s", exc)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # One bad tick must not end the loop: that would strand a queued
+            # change permanently, silently.
+            logger.error("Strategy queue check failed: %s", exc)
 
 
 # ============================================================
@@ -720,6 +800,12 @@ async def get_settings(_: str = Depends(require_api_token)):
     """Everything needed to render the settings panel, plus what is in force."""
     payload = settings_store.describe()
 
+    # Which strategies could actually be switched to. Read from the volume, so
+    # this cannot offer something the bot would fail to load.
+    payload["available_strategies"] = strategy_switch.available_strategies()
+    # A queued change, if one is waiting for positions to close.
+    payload["pending_strategy"] = strategy_switch.describe()
+
     # The running bot's view, which is what actually matters. If this disagrees
     # with the settings file, the file was written but not applied - worth
     # showing rather than hiding.
@@ -733,6 +819,9 @@ async def get_settings(_: str = Depends(require_api_token)):
                 "tradable_balance_ratio": cfg.get("tradable_balance_ratio"),
                 "dry_run_wallet": cfg.get("dry_run_wallet"),
                 "db_url": cfg.get("db_url"),
+                # Shown because it is now the thing that can be out of step with
+                # the settings file while a change is queued.
+                "strategy": cfg.get("strategy"),
             }
         except FreqtradeAPIError as e:
             payload["effective"] = None
@@ -744,11 +833,53 @@ async def get_settings(_: str = Depends(require_api_token)):
     return payload
 
 
+@app.post("/api/v1/settings/strategy/cancel")
+async def cancel_strategy_switch(user: str = Depends(require_api_token)):
+    """Drop a queued strategy change and resume the bot on the current strategy."""
+    actor = resolve_operator_name(user)
+    if not freqtrade_client:
+        raise HTTPException(
+            status_code=503, detail="The Freqtrade API client is not available."
+        )
+
+    was_running = True
+    try:
+        was_running = (await freqtrade_client.status()).is_running
+    except FreqtradeAPIError:
+        # Default to resuming. A bot left paused because a status call failed
+        # would look fine from outside and trade nothing.
+        was_running = True
+
+    result = await strategy_switch.cancel(
+        actor=actor, was_running=was_running, freqtrade=freqtrade_client
+    )
+
+    try:
+        await audit_log.record(
+            plugin="settings",
+            action="strategy_switch_cancelled",
+            user_initiated=True,
+            input_data={"actor": actor},
+            output_data=result,
+            decision_reasoning="Operator cancelled a queued strategy change.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not audit the strategy cancellation: %s", exc)
+
+    return result
+
+
 @app.post("/api/v1/settings")
 async def update_settings(
     request: SettingsRequest, user: str = Depends(require_api_token)
 ):
-    """Validate, write, audit and apply a settings change."""
+    """Validate, write, audit and apply a settings change.
+
+    The strategy is handled separately, because it is the one setting that cannot
+    always take effect at once. With positions open, applying it would hand those
+    positions' exits to a strategy that never opened them. So instead of applying
+    or refusing, it is queued and the bot is paused until they close.
+    """
     actor = resolve_operator_name(user)
 
     try:
@@ -757,6 +888,65 @@ async def update_settings(
         )
     except settings_store.SettingsError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
+
+    # Split the strategy out of the batch. Everything else can apply right now,
+    # and should: refusing to change max_open_trades because a strategy switch is
+    # waiting would be a worse answer than doing the part that is safe.
+    requested_strategy = changes.pop("strategy", None)
+    strategy_result: Optional[Dict[str, Any]] = None
+
+    # How many positions are open decides whether the strategy applies now.
+    open_trades = 0
+    was_running = True
+    if requested_strategy is not None and freqtrade_client:
+        try:
+            status = await freqtrade_client.status()
+            open_trades = status.open_trades_count
+            was_running = status.is_running
+        except FreqtradeAPIError as e:
+            # Cannot tell whether positions are open, so cannot safely apply.
+            # Queue rather than guess: guessing "none open" is the one answer that
+            # can hand open positions to a different strategy.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Could not read the bot's open trade count, so the strategy "
+                    "change was not made. %s" % e
+                ),
+            )
+
+    if requested_strategy is not None and open_trades > 0:
+        # Defer. The other changes in this request still go through below.
+        if not freqtrade_client:
+            raise HTTPException(
+                status_code=503, detail="The Freqtrade API client is not available."
+            )
+        try:
+            strategy_result = await strategy_switch.request(
+                requested_strategy,
+                actor=actor,
+                open_trades=open_trades,
+                was_running=was_running,
+                freqtrade=freqtrade_client,
+            )
+            await _audit_strategy_switch(actor, strategy_result)
+        except strategy_switch.StrategySwitchError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+    elif requested_strategy is not None:
+        # No positions open - it can go through the ordinary path with everything
+        # else in one write and one reload.
+        changes["strategy"] = requested_strategy
+
+    if not changes:
+        # Only a queued strategy change. Report the queue, not a settings write
+        # that did not happen.
+        return {
+            "applied": False,
+            "changes": {},
+            "strategy": strategy_result,
+            "summary": (strategy_result or {}).get("message")
+            or "Nothing to change.",
+        }
 
     try:
         settings_store.write(changes, actor=actor)
@@ -776,7 +966,27 @@ async def update_settings(
     result = await _apply_and_reload(actor, changes)
     result["summary"] = _settings_summary(changes, result)
     result["audit_note"] = audit_note
+    result["strategy"] = strategy_result
     return result
+
+
+async def _audit_strategy_switch(actor: str, result: Dict[str, Any]) -> None:
+    """Record that a strategy change was requested and what happened to it."""
+    try:
+        await audit_log.record(
+            plugin="settings",
+            action="strategy_switch_requested",
+            user_initiated=True,
+            input_data={"actor": actor},
+            output_data=result,
+            decision_reasoning=(
+                "Operator asked to change strategy; queued until open positions close."
+                if result.get("queued")
+                else "Operator changed strategy; applied immediately."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not audit the strategy change: %s", exc)
 
 
 def _settings_summary(changes: Dict[str, Any], result: Dict[str, Any]) -> str:

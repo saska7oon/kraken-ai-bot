@@ -202,6 +202,19 @@ EDITABLE: Tuple[Setting, ...] = (
             "having nothing left for the exchange fee."
         ),
     ),
+    Setting(
+        key="strategy",
+        label="Strategy",
+        kind="strategy",
+        help="Which strategy file the bot runs",
+        explain=(
+            "The rules that decide when to buy and sell. Changing this is not "
+            "instant: if any position is open, the bot stops opening new ones and "
+            "waits for the open positions to close first, because a new strategy "
+            "would otherwise take over the exits of trades it never opened. "
+            "The change applies by itself once they are closed."
+        ),
+    ),
 )
 
 EDITABLE_BY_KEY: Dict[str, Setting] = {s.key: s for s in EDITABLE}
@@ -290,6 +303,28 @@ def _coerce(setting: Setting, value: Any) -> Any:
                 "%s must be true or false, not %r." % (setting.label, value)
             )
         return value
+
+    if setting.kind == "strategy":
+        if not isinstance(value, str):
+            raise SettingsError(
+                "%s must be a strategy name, not %r." % (setting.label, value)
+            )
+        name = value.strip()
+        if not name:
+            raise SettingsError("%s cannot be empty." % setting.label)
+        # Imported here rather than at module scope: strategy_switch imports
+        # SETTINGS_DIR from this module, so a top-level import either way would be
+        # circular. A strategy that cannot be loaded is refused at the point of
+        # change rather than after the bot has reloaded and failed to start.
+        from ai_orchestrator.core import strategy_switch
+
+        if not strategy_switch.strategy_exists(name):
+            known = strategy_switch.available_strategies()
+            raise SettingsError(
+                "No strategy named %r is available in the strategies folder%s."
+                % (name, (". Available: " + ", ".join(known)) if known else " (it is empty)")
+            )
+        return name
 
     if isinstance(value, bool):
         raise SettingsError(

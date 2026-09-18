@@ -341,6 +341,25 @@
     // STRATEGY
     // The strategy file is staged into the strategies volume by the entrypoint
     // from a read-only Swarm config.
+    //
+    // This value MUST stay here, in the config, and MUST NOT be passed as a
+    // --strategy command-line argument.
+    //
+    // Freqtrade resolves the strategy like this (configuration.py,
+    // _process_common_options):
+    //
+    //     if self.args.get("strategy") or not config.get("strategy"):
+    //         config.update({"strategy": self.args.get("strategy")})
+    //
+    // so a --strategy flag on the command line overrides EVERY config file, on
+    // every start and every reload. It was passed there originally, which meant
+    // the operator could change the strategy in the UI, watch it save, and have
+    // nothing happen - because the command line quietly won. Removing the flag is
+    // what makes the setting mean anything.
+    //
+    // The default is here rather than only in runtime_settings.json so that a bot
+    // with no operator settings still starts. Freqtrade refuses to start without
+    // a strategy.
     // -------------------------------------------------------------------------
     "strategy": "ModerateMultiPairStrategy",
 

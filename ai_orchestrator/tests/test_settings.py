@@ -34,6 +34,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 _TMP = tempfile.mkdtemp(prefix="settings-test-")
 os.environ["ORCHESTRATOR_SETTINGS_DIR"] = _TMP
 
+# A strategies directory with a real strategy in it, for the same reason.
+#
+# Without this the directory does not exist, every strategy lookup returns empty,
+# and the settings validator refuses any strategy name for not existing. That
+# masked a real bug: the test asserting "an approved strategy change is refused"
+# passed because the name was unknown, not because the chat is barred from writing
+# it - so removing the bar changed nothing and went undetected. Here the name is
+# valid, so the only thing that can refuse it is the bar itself.
+_STRAT_DIR = Path(_TMP) / "strategies"
+_STRAT_DIR.mkdir(parents=True, exist_ok=True)
+(_STRAT_DIR / "moderate_multi.py").write_text(
+    "from freqtrade.strategy import IStrategy\n\n\n"
+    "class ModerateMultiPairStrategy(IStrategy):\n    timeframe = '5m'\n",
+    encoding="utf-8",
+)
+os.environ["ORCHESTRATOR_STRATEGY_DIR"] = str(_STRAT_DIR)
+
 from ai_orchestrator.core import dryrun_reset, settings_store  # noqa: E402
 from ai_orchestrator.core.settings_store import (  # noqa: E402
     LIVE_CONFIRMATION_PHRASE,
@@ -623,19 +640,24 @@ check("an approved list cannot carry dry_run",
 check("dry_run in an approved list is refused",
       result["executed"][0]["status"] == "refused", str(result["executed"][0]))
 
-# 6. A key the AI may PROPOSE but the settings layer cannot apply is refused at
-#    apply time. This is the case that makes the second gate load-bearing: an
-#    earlier version of this test used `api_server`, which `_validate_change`
-#    already refuses, so removing the second gate went undetected.
+# 6. A key the AI may PROPOSE but this plugin must never WRITE is refused at apply
+#    time. This is the case that makes the second gate load-bearing.
 #
-#    `strategy` is exactly this shape - proposable, but set by a --strategy
-#    command-line argument that Freqtrade lets override the config, so writing it
-#    to the settings file would be a silent no-op.
-strategy_change = plugin._config_change("strategy", "SomeOtherStrategy")
+#    `strategy` is exactly this shape. It became an editable setting when runtime
+#    strategy switching was added, so the allowlist check no longer excludes it -
+#    and without a separate refusal an approved strategy change would be written
+#    straight to the settings file from chat, bypassing the queue that waits for
+#    open positions to close. The change would then land on the next reload and
+#    take over the exits of trades it never opened.
+#
+#    Note the value is a REAL strategy name. The earlier version of this test used
+#    a made-up one, which was refused by the settings validator for not existing -
+#    so it passed for the wrong reason and would not have caught the bypass.
+strategy_change = plugin._config_change("strategy", "ModerateMultiPairStrategy")
 check("strategy is proposable", not strategy_change.get("invalid")
       and not strategy_change.get("frozen"), str(strategy_change))
-check("a strategy proposal is marked as needing a redeploy",
-      strategy_change.get("applies_via") == "redeploy",
+check("a strategy proposal points at the Settings page",
+      strategy_change.get("applies_via") == "settings_page",
       str(strategy_change.get("applies_via")))
 
 before_strategy = settings_store.read().settings
@@ -645,8 +667,10 @@ check("an approved strategy change is refused",
 check("a refused strategy change writes nothing",
       settings_store.read().settings == before_strategy,
       str(settings_store.read().settings))
-check("the strategy refusal explains the redeploy",
-      "redeploy" in (result["executed"][0].get("reason") or "").lower(),
+# The refusal must point somewhere useful. "Not allowed" alone would leave the
+# operator with an approved decision and no idea where to apply it.
+check("the strategy refusal points at the Settings page",
+      "settings" in (result["executed"][0].get("reason") or "").lower(),
       str(result["executed"][0].get("reason")))
 
 # A genuinely unknown key is refused too.
