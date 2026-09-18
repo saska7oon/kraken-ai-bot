@@ -754,6 +754,55 @@ for route_text, node in settings_routes:
 
 
 # ===========================================================================
+print("\nThe trailing stop switch follows its own value")
+# ===========================================================================
+# The settings panel writes trailing_stop_positive into runtime_settings.json,
+# but the flag that actually ENABLES the trailing stop is a separate key
+# (`trailing_stop`) that lives in config/base.json. Writing one without the other
+# is the failure mode this project keeps rediscovering: the operator moves the
+# slider, the number changes, and the bot behaves identically.
+#
+# So the writer derives trailing_stop. 0 means off.
+import tempfile as _tempfile
+import os as _os
+
+_saved_dir = _os.environ.get("ORCHESTRATOR_SETTINGS_DIR")
+_os.environ["ORCHESTRATOR_SETTINGS_DIR"] = _tempfile.mkdtemp()
+import importlib as _importlib
+_importlib.reload(settings_store)
+
+_base = {
+    "dry_run": True, "max_open_trades": 3, "stoploss": -0.12,
+    "tradable_balance_ratio": 0.9, "dry_run_wallet": 1000,
+    "amount_reserve_percent": 0.05,
+}
+
+for _val, _want in ((0.0, False), (0.05, True), (0.10, True)):
+    _snap = settings_store.write(dict(_base, trailing_stop_positive=_val), actor="test")
+    _got = _snap.settings.get("trailing_stop")
+    check("trailing_stop_positive=%s implies trailing_stop=%s" % (_val, _want),
+          _got is _want,
+          "wrote %r but trailing_stop came out %r - the slider would do nothing"
+          % (_val, _got))
+
+check("0.0 is an allowed trailing value (it is how you switch it off)",
+      any(s.key == "trailing_stop_positive" and s.minimum == 0.0
+          for s in settings_store.EDITABLE),
+      "minimum is not 0.0, so there is no way to express 'off'")
+
+check("every risk preset leaves the trailing stop off",
+      all(p["values"].get("trailing_stop_positive") == 0.0
+          for p in settings_store.RISK_PRESETS.values()),
+      "a preset turns on a setting the backtester measured as harmful")
+
+if _saved_dir is not None:
+    _os.environ["ORCHESTRATOR_SETTINGS_DIR"] = _saved_dir
+else:
+    _os.environ.pop("ORCHESTRATOR_SETTINGS_DIR", None)
+_importlib.reload(settings_store)
+
+
+# ===========================================================================
 print("\n" + "=" * 72)
 print("PASSED: %d   FAILED: %d" % (PASSED, FAILED))
 if FAILURES:

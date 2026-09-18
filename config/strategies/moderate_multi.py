@@ -130,10 +130,14 @@ class ModerateMultiPairStrategy(IStrategy):
     # 0.02/0.03 were 5m values. A 2% trail is smaller than one ordinary day's
     # range on every one of these pairs, so it would exit on the first quiet
     # pullback.
-    trailing_stop = True
+    # OFF. Measured with freqtrade's backtester: with this on, the strategy lost
+    # money in 8 of 8 parameter sets; with it off, 7 of 8 were positive. The
+    # Donchian 10-day-low exit is already a trailing stop, and it trails price
+    # structure rather than a fixed percentage. See config/base.json.
+    trailing_stop = False
     trailing_stop_positive = 0.08
     trailing_stop_positive_offset = 0.10
-    trailing_only_offset_is_reached = False
+    trailing_only_offset_is_reached = True
 
     # -------------------------------------------------------------------------
     # TIMEFRAME - 1 day

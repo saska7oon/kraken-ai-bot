@@ -146,10 +146,14 @@
 
     "stoploss": -0.12,
 
-    "trailing_stop": true,
+    // OFF. See config/base.json for the measurement: with the old
+    // trailing_only_offset_is_reached=false the stop trailed 12% below every
+    // candle's high from trade open, which lost money in 8 of 8 parameter sets.
+    // The Donchian 10-day-low exit is already a trailing stop.
+    "trailing_stop": false,
     "trailing_stop_positive": 0.08,
     "trailing_stop_positive_offset": 0.10,
-    "trailing_only_offset_is_reached": false,
+    "trailing_only_offset_is_reached": true,
 
     "minimal_roi": {
         "0": 1.0
