@@ -447,9 +447,73 @@ The authors' proposed mitigation is worth stating because it is cheap and almost
 
 **[REASONING] Why this is the single most important base-rate finding in this report.** An R² of 0.02 means **98% of the variance in live Sharpe ratio is unexplained by the backtest Sharpe ratio.** For a small-account trader this is the whole ballgame: the number you would use to decide whether to deploy capital carries essentially no information about what happens when you do. And the paper's own conclusion states it directly: a reported backtest Sharpe ratio "**can not be expected to prevail in future market environments with any reasonable confidence**."
 
-⚠️ **One important negative finding about this paper.** I grepped the full text: it **does not** report what fraction of the 888 strategies lost money, and it contains **no "87%" or "90%" figure**. Any site citing the 888-strategy study for a *percentage failure rate* is over-reading it. This matters because, as §3.6 shows, that is exactly what one vendor blog does.
+⚠️ **One important negative finding about this paper.** I grepped the full text: it **does not** report what fraction of the 888 strategies lost money, and it contains **no "87%" or "90%" figure**. Any site citing the 888-strategy study for a *percentage failure rate* is over-reading it. This matters because, as §3.7 shows, that is exactly what one vendor blog does.
 
-### 3.2 The base rate is *conditional*, not constant — the most useful nuance in the literature
+### 3.2 The largest out-of-sample audit of *public* strategies: 895 strategies, 2 survive, **0 beat holding**
+
+This is the strongest large-N evidence I found on the base-rate question, and I verified its numbers **directly from its raw data file**, not from its prose.
+
+**Source:** `https://github.com/Apex-prim/strategy-audit` — README and `LEDGER.csv` fetched raw **[VERIFIED-URL]**. Repo metadata via GitHub API: **3 stars, 0 forks, MIT, created 2026-08-20, pushed 2026-08-24** — i.e. brand new and unreplicated by anyone else.
+
+**What it is.** An out-of-sample audit of **895 unique strategy classes from 53 public repositories** — "Every public freqtrade strategy that could be found and loaded... run by **freqtrade itself** on its own declared timeframe, in its author's window and in years the author never saw." The author runs freqtrade 2026.7 itself rather than re-implementing the logic, explicitly to pre-empt "you rewrote my logic wrong."
+
+**I independently recomputed the headline results from `LEDGER.csv` (233,709 bytes, 895 data rows, 23 columns).** My own computation, not the author's summary:
+
+| My computation from the raw CSV | Result |
+|---|---|
+| Total strategies in ledger | **895** ✓ |
+| Strategies surviving through the final gate (`survives_through = E6`) | **2** |
+| …of which `beats_bh == True` | **0** ✓ |
+| Strategies dropped at the first gate (`E0`) | 878 |
+| `beats_bh == True` anywhere in the ledger | 28 (but 0 survive the gates) |
+
+**The two survivors, in full (my extraction from the CSV):**
+
+| Strategy | Repo | OOS trades | OOS avg/trade | OOS p | OOS CI lower | OOS total | Buy-and-hold | Beats B&H? |
+|---|---|---|---|---|---|---|---|---|
+| `CombinedBinHClucAndMADV5` | davidzr/freqtrade-strategies | **1,295** | **+0.46%** | **8.4e-15** | +0.344 | **+106.91%** | **+346.34%** | **No** |
+| `ClucHAnix_5m_old` | TheoBrigitte/freqtrade | 2,190 | +0.29% | 6.5e-05 | +0.148 | +111.99% | +346.34% | **No** |
+
+**These figures match the README's prose exactly** — it states the survivor "returns **+106.9%** while buy-and-hold returns **+346.3%**" and "earns a genuine **+0.46%** *per trade*," which is precisely what the CSV rows contain. That is a real verification, not a restatement.
+
+**[REASONING] This single row is the most instructive number in this entire report.** `CombinedBinHClucAndMADV5` has **1,295 out-of-sample trades** (far above the ~200–1,000 threshold I derived in §2.2), a per-trade edge of **+0.46%**, **p = 8.4 × 10⁻¹⁵**, and a **positive 95% confidence-interval lower bound** — a *statistically bulletproof* edge by every test in §2. And it still **underperforms simply holding the coins by 239 percentage points of cumulative return.** The author's own framing is exactly right: "**It is not broken and it is not noise: it captures a fraction of a rise it never predicted, and holding captured all of it.**" **Statistical significance is necessary but nowhere near sufficient.**
+
+**The funnel, and where the corpus dies.** The author reports the largest single drop as `G2_is_pos`: **456 → 158** — "strategies that lose money **in the window their own author chose**. **Two thirds of published strategies are already negative before anyone tests them on new data.**" The second-largest is `G7_recursive` (51 killed, **50 of them measured indicator drift** — indicator values that change with how much history you feed them).
+
+**The pre-registered endpoint:** "PRIMARY ENDPOINT — survivors that beat buy-and-hold, frozen rule: **0 of 456 eligible = 0.00%**." Multiplicity is handled explicitly: Benjamini–Hochberg threshold 3.872e-02 over 81 tests (72 rejected), with **Benjamini–Yekutieli** (valid under *arbitrary* dependence) reported alongside at 2.752e-03 — "both survivors still clear it."
+
+**The most valuable part: the author's own self-criticism, which I quote because it is what separates this from the sources in §3.7.**
+
+- The README **was previously wrong**: "The README once carried *'571 strategies, 55 clean'* for a day after the corpus had grown past 900, and a reader built an assessment on it — so the numbers here now have a return code behind them rather than a promise." A CI gate (`verify_ledger.py`) now rebuilds the ledger block from `LEDGER.csv` and fails on any mismatch.
+- The verdict for this corpus is **"repair-adjusted", not pre-registered**: `freeze_guard.py` reports "ladder last changed: 2026-08-22 10:59:04 UTC / first observation: 2026-08-21 19:58:24 UTC / **verdict: repair-adjusted**" — because the last two gates were added 15 hours *after* the first result card. The author states plainly: "**Transparency does not convert a post-hoc decision into a pre-registered one.**"
+- **The aggregate verdict depends on the window, and the author says so.** Splitting by calendar year (a division declared before the run): in 2020, 2021, 2023, 2024 (up years) **0 of 5** survivors beat buy-and-hold; in 2022, 2025, 2026 (down years) **5 of 5** did. "Seven years, seven correct calls by the sign of the market. **The aggregate verdict was a property of the window.**" And crucially: "**That is not a discovery of working strategies.** In 2022 the market fell 66.7% while these five returned between −5.9% and +3.5% — they were barely in the market at all, and **sitting out a crash is something cash does without any strategy.**"
+
+**Caveats I must state, and they are real:**
+
+1. **This is out-of-sample *backtest*, not live trading.** It answers "backtest → new data," which is *not* the same as "backtest → live with real fills." It is nevertheless the closest large-N evidence that exists.
+2. **Self-published and unreplicated** — 3 stars, 0 forks, weeks old, and "independent" is the author's own description. I verified the data file's contents but **could not independently reproduce the ladder's specific counts**: my naive recomputation with guessed thresholds gave 533 strategies with `is_trades>0` and 192 with `is_exp>0`, versus the README's 496 and 158. The gates have thresholds I do not have (`verify_ledger.py` would settle it), so **I confirm the endpoints (2 survivors, 0 beating buy-and-hold, and the exact return figures) but not the intermediate funnel counts.**
+3. **The corpus is 65% copies.** The author reports "**65% of the 2,567 strategy classes found are copies** of a few originals, propagated without anyone re-testing them," and 17 of 53 repos contributed no original strategy (one holds 477 classes). So the **effective number of independent strategies is far below 895** — which the author addresses via Benjamini–Yekutieli but which any reader should keep in mind.
+4. **One window, 8 pairs, one execution model**, as the author repeatedly states.
+
+**A directly corroborating line-by-line audit.** The same author audited five strategies from `paulcpk/freqtrade-strategies-that-work` — the exact repo I cited in §1.7 — applying significance tests to both windows **[VERIFIED-URL]**:
+
+| Strategy | In-sample avg/trade | IS p | Out-of-sample avg/trade | OOS p |
+|---|---|---|---|---|
+| EMAPriceCrossoverWithThreshold | 1.39% | **0.113** | 0.65% | 0.161 |
+| DoubleEMACrossoverWithTrend | 0.38% | **0.049** | 0.19% | 0.290 |
+| MACDCrossoverWithTrend | 0.42% | **0.128** | 0.05% | 0.883 |
+| RSIDirectionalWithTrendSlow | 1.03% | **0.381** | 0.27% | 0.924 |
+| RSIDirectionalWithTrend | 0.34% | **0.238** | −0.07% | 0.556 |
+
+> "**Four of the five were never statistically significant in their author's own window, and none is significant out of sample.** Only `DoubleEMACrossoverWithTrend` clears p < 0.05 in-sample, and only just (0.049). The strongest performer of the set — `EMAPriceCrossoverWithThreshold` at 1.39% per trade — sits at **p = 0.113**."
+
+**[REASONING] This is the empirical confirmation of §2.2.** A published strategy collection advertising total profits of 16–122% (§1.7) turns out to be **statistically insignificant in its own backtest window** for 4 of 5 strategies — exactly what the trade-count arithmetic predicts. And the fee sensitivity is equally damning: at **0.3% per side** (routine for XLM/DASH/ADA hourly spreads in 2018–2020), three of the five go to ~zero or negative — "`MACDCrossoverWithTrend` 0.01% ← **zero wearing a plus sign**."
+
+⚠️ **One discrepancy I could not resolve.** The README's prose says "Under the rules declared before the sweep, **66** strategies survive and **four** beat the market," while the ledger block says E0 survivors **17** / beating buy-and-hold **3** — and my CSV computation gives 15 E1-survivors of which **3** beat buy-and-hold. The "3" agrees; the survivor counts (66 vs 17 vs 15) do not. Given the author documents that the corpus grew and that numbers changed, the prose likely reflects a superseded corpus state. **Treat the ledger block and the CSV as authoritative; treat the prose's 66/4 as stale.**
+
+
+
+### 3.3 The base rate is *conditional*, not constant — the most useful nuance in the literature
 
 **[PREPRINT]** — Bailey, Borwein, López de Prado & Zhu, "The Probability of Backtest Overfitting" (verified in §2.4, `https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf`).
 
@@ -463,7 +527,7 @@ The same paper supplies both ends of the range:
 
 **This is the single most important qualification in the base-rate question.** There is no fixed failure rate to quote, because the failure rate is a *function of the development process*. A strategy found by searching thousands of configurations has a ~50–78% chance of negative out-of-sample performance; a strategy with a genuine underlying effect has ~3%. **Quoting one number for "backtested strategies" destroys the actual finding.** The correct statement is: *the base rate depends on how hard you searched, and for a hyperopt-heavy retail workflow (§2.6) it is at the bad end of that range.*
 
-### 3.3 Academic false-discovery rates — a *different* question, and the difference matters
+### 3.4 Academic false-discovery rates — a *different* question, and the difference matters
 
 **[PEER-REVIEWED] — Harvey, Liu & Zhu (2016)** (verified in §2.5, `https://people.duke.edu/~charvey/Research/Published_Papers/P118_and_the_cross.PDF`). Their appendix estimate is the most-cited "failure rate" in finance: modelling observed t-statistics as exponential draws above a 2.57 cutoff, "the mean absolute value of the t-statistic for the underlying factor population is 2.07 and **about 71.1% of tried factors are discarded**," with the total number of factor tests estimated at **824**. Conclusion: "**most claimed research findings in financial economics are likely false**."
 
@@ -483,9 +547,9 @@ The same paper supplies both ends of the range:
 
 HLZ's 71.1% is about *academic equity factors*, is an *inference* from a fitted distribution rather than a direct count, and concerns *factors tested and discarded* — a different population from *retail traders who deployed and lost*. The transferable content is the **mechanism** (multiple testing inflates the best-looking result), not the number.
 
-### 3.4 Retail trader base rates — the right evidence, from adjacent markets
+### 3.5 Retail trader base rates — the right evidence, from adjacent markets
 
-No crypto-specific base rate exists (§3.7), so the best available proxies come from equity/futures day-trading research. **These are not crypto**, and the caveat is load-bearing.
+No crypto-specific base rate exists (§3.6), so the best available proxies come from equity/futures day-trading research. **These are not crypto**, and the caveat is load-bearing.
 
 **[PEER-REVIEWED] — Barber, B., Lee, Y.-T., Liu, Y.-J., & Odean, T. (2014), "The cross-section of speculator skill: Evidence from day trading," *Journal of Financial Markets* 18:1–24.** PDF verified and read: `https://faculty.haas.berkeley.edu/odean/papers/Day%20Traders/The%20Cross-Section%20of%20Speculator%20Skill.pdf` — Taiwan Stock Exchange, 1992–2006.
 
@@ -514,7 +578,7 @@ And the attrition pattern, which is the most citable single result in this liter
 - **ESMA (2018)**, ref ESMA71-98-128: "NCAs' analyses on CFD trading across different EU jurisdictions shows that **74-89% of retail accounts typically lose money** on their investments, with average losses per client ranging from €1,600 to €29,000." — `https://www.esma.europa.eu/press-news/esma-news/esma-agrees-prohibit-binary-options-and-restrict-cfds-protect-retail-investors` — **leveraged CFDs, account level, EU, 2018 — not crypto bots.**
 - **CFTC**, *Must Know Forex*: "**Two out of three forex customers lose money.** ... Over the past year, about one-third of customers at registered OTC forex dealers made a profit, while two-thirds lost money." (footnote: based on disclosures for Q2 2021–Q1 2022) — `https://www.cftc.gov/LearnAndProtect/AdvisoriesAndArticles/CustomerAdvisory_MustKnowForex.html` — **retail OTC forex — not crypto bots.**
 
-### 3.5 Crypto-specific evidence
+### 3.6 Crypto-specific evidence
 
 **[VERIFIED-URL] — BIS Bulletin No 69, "Crypto shocks and retail losses" (Cornelli, Doerr, Frost & Gambacorta, 20 Feb 2023).** PDF verified and read: `https://www.bis.org/publications/bulletin-69-crypto-shocks-and-retail-losses.pdf`.
 
@@ -527,7 +591,7 @@ And the attrition pattern, which is the most citable single result in this liter
 
 **And the crypto-specific base rate genuinely does not exist.** I found no peer-reviewed study of crypto trading-bot or strategy survival. Searches returned only vendor blogs plus one tangential peer-reviewed paper on chart patterns in the Mt.Gox era that contains no profitability base rate. **This is a real gap in the literature, not a gap in my search.**
 
-### 3.6 The "87%" and "90%" failure rates — traced, and both are unsourced vendor folklore
+### 3.7 The "87%" and "90%" failure rates — traced, and both are unsourced vendor folklore
 
 This is the most valuable negative finding of this section, and I verified both pages by reading them.
 
@@ -535,7 +599,7 @@ This is the most valuable negative finding of this section, and I verified both 
 
 > "Research in empirical finance puts the failure rate of backtested trading strategies at **up to 87%**."
 
-**No citation is given for 87% anywhere on the page.** The only studies it names are Harvey, Liu & Zhu (2016) and Bailey/Borwein/López de Prado/Zhu (2014) — **I read both in full (§2.4, §2.5, §3.3); neither contains an 87% figure.** It also cites "HFR data consistently shows annual systematic fund attrition in the **5% to 15%** range" — that is **hedge-fund closure rates**, a completely different quantity from strategy failure, and it is presented adjacent to the 87% claim in a way that implies support. The page is a funnel for a validation product ("Join the waitlist", "Start Free").
+**No citation is given for 87% anywhere on the page.** The only studies it names are Harvey, Liu & Zhu (2016) and Bailey/Borwein/López de Prado/Zhu (2014) — **I read both in full (§2.4, §2.5, §3.4); neither contains an 87% figure.** It also cites "HFR data consistently shows annual systematic fund attrition in the **5% to 15%** range" — that is **hedge-fund closure rates**, a completely different quantity from strategy failure, and it is presented adjacent to the 87% claim in a way that implies support. The page is a funnel for a validation product ("Join the waitlist", "Start Free").
 
 **(ii) "Why 90% of Trading Bots Fail"** — `https://intradaylab.com/blog/why-trading-bots-fail-backtest-mistakes` — fetched and read in full. **[BLOG — no traceable source]**
 
@@ -547,9 +611,9 @@ Its "Key Stats" box asserts five numbers, **none with any citation**:
 
 ⚠️ **The instructive detail: this page mixes one genuine, correctly-cited finding with four unsourced numbers.** It states — accurately — "A study of **888 algorithmic strategies** found that backtested Sharpe ratios are poor predictors of real-world performance — the **R² was less than 0.025**." That is the Wiecki et al. paper from §3.1, and the figure is right. **But the page never links it**, so a reader cannot check it, and it sits alongside four fabricated-looking statistics. This is precisely the pattern that makes vendor content dangerous: a real citation lending credibility to invented neighbours.
 
-**[REASONING] Conclusion on the folklore numbers.** The "87%" appears to be invented or telephone-gamed from unrelated figures (hedge-fund attrition, or HLZ's 71.1%). The "90%" has no source at all. **Neither should be cited.** The defensible substitute is §3.1 (R² ≈ 0.02) and §3.2 (conditional base rate).
+**[REASONING] Conclusion on the folklore numbers.** The "87%" appears to be invented or telephone-gamed from unrelated figures (hedge-fund attrition, or HLZ's 71.1%). The "90%" has no source at all. **Neither should be cited.** The defensible substitute is §3.1 (R² ≈ 0.02) and §3.3 (conditional base rate).
 
-### 3.7 What the verified real-world record does tell you about base rates
+### 3.8 What the verified real-world record does tell you about base rates
 
 **[REASONING, from the verified cases in §1.]** My case sample is small and deliberately **not** presented as representative — but its *composition* is informative:
 

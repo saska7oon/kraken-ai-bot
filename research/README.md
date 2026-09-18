@@ -66,7 +66,7 @@ same ground is not covered twice.
 Before running another sweep, read §5 of `strategy-count-and-overfitting-sources.md`
 and use a held-out `--timerange` that has never been optimised on.
 
-**3. The venue's fee schedule, not the signal, is the binding constraint.**
+**3. The venue's fee schedule sets a ceiling on trade frequency.**
 At Kraken Tier 1 a round trip costs ~0.80%. On 5-minute candles the average
 BTC/CAD candle's entire range is 0.118% — the fee is 13.6 candles of total
 range, so no 5m strategy survives. On daily candles the arithmetic is just as
@@ -79,9 +79,17 @@ fees and would need 64–75% directional accuracy just to break even.
 > figure is **~53.5%/yr**. The conclusion is unchanged; the number was wrong.
 > See `fee-ceiling-and-quote-currency.md` §1.
 
-The consequence: **looking for a better signal will not produce more trades.**
-No strategy choice fixes a 0.80% taker fee. The levers that actually matter are
-the fee tier, the number of trades taken, and order type (post-only maker).
+> **Second correction (2026-09-18):** this section previously read *"the venue's
+> fee schedule, **not the signal**, is the binding constraint."* That is
+> misleading and is superseded by finding 4 below. The fee schedule constrains
+> how *often* you may trade; it does **not** constrain whether you can *know*
+> your strategy works. At this trade count the fee drag is survivable
+> (**~2.7%/yr**, about 29% of the reported CAGR) and the binding constraint is
+> **sample size**.
+
+The consequence for signal-hunting: **no strategy choice fixes a 0.80% taker
+fee**, and the levers that matter are the fee tier, the number of trades taken,
+and order type (post-only maker).
 
 **And the fee tier is a closed door.** Since July 2026 tiers are the best of
 volume *or* assets held, but Tiers 1–2 have **no assets route at all** and the
@@ -95,6 +103,48 @@ smaller rate cut than the volume it demands. Full analysis in
 out.** A $1,000 account and a $1,000,000 account trading monthly both pay
 3.20%/yr — so "is there a strategy for a small account?" has no distinct
 answer. The constraint is turnover, not capital.
+
+**4. The backtest cannot tell you whether this strategy works.**
+
+This is the most important finding in the archive, and it is uncomfortable.
+
+Freqtrade's own backtesting documentation presents a **77-trade, Sharpe 3.89**
+example on a $1,000 account and labels it **p = 0.4768 — *"not distinguishable
+from luck"***. This bot's backtest is **14 trades at Sharpe 0.14**: *weaker than
+the example Freqtrade uses to warn people*. [VERIFIED-URL:
+<https://www.freqtrade.io/en/stable/backtesting/>]
+
+Since Freqtrade confirms its t-statistic **is** SQN, `t = √N · mean / SD` — a
+realistic trend strategy needs **~200–1,000 trades** before the result means
+anything. A Monte Carlo of a **zero-edge** 14-trade sample produces **≥ +13.67%
+about 21–31% of the time**. Our headline number sits inside that band.
+
+**So `+13.67%` is not evidence of an edge.** It is consistent with no edge at
+all. Read the backtest as *"the plumbing works and nothing exploded"*, not as
+*"this makes money."*
+
+Buy-and-hold comparison cuts **both** ways and settles nothing:
+- 17-month window: equal-weight B&H **+53.06%** vs bot **+13.67%** — B&H wins.
+- From 2024-11-27, when all four pairs existed: B&H **−26.06%** vs bot
+  **+13.67%** — bot wins.
+
+Neither establishes skill. **The bot's −8.83% drawdown against B&H's −63.51%
+reflects low exposure — it is in cash most of the time — not risk management.**
+
+Two independent peer-reviewed lines agree on where the honest case lies:
+Hudson & Urquhart (~15,000 technical rules) found many beat buy-and-hold on
+risk-adjusted return and drawdown, but only **4.96–15.69% beat it on raw
+return**, with **no out-of-sample predictability** in Bitcoin; Borgards (2021)
+measured low-frequency crypto trend following at **+127% vs B&H +186%**, with
+drawdown **−16.5% vs −90.2%**. **The defensible claim is drawdown management,
+not return.**
+
+Retail base rates, five independent regulators, all in the same band:
+ESMA **74–89%**, FCA **82%**, ASIC **63–80%**, BIS **73–81%**, Brazil **97%** of
+those persisting 300+ days — with *"no evidence of learning"*. And the public
+record for $1,000–$2,000 accounts contains **no independently verified track
+record at all**. Full evidence in `small-account-algo-trading.md` and
+`small-account-cases-and-backtest-reliability.md`.
 
 ---
 
@@ -127,6 +177,28 @@ answer. The constraint is turnover, not capital.
   do not hold a top level. USD spreads did not move at all, which is the depth
   signal. Any spread comparison in this archive that rests on one sample should
   be discarded — trade counts are the robust measure.
+- **Fund by e-Transfer, never by debit card.** A debit-card deposit costs
+  **0.25% + 3.75% ≈ $56.50 on $1,500** — about four round trips' worth of fees,
+  spent before the bot trades once. e-Transfer deposit is free; e-Transfer
+  withdrawal is a flat **$10 CAD (0.67%)**.
+- **Kraken minimum stakes may silently skip trades.** The nominal minimum is
+  $3–10 CAD, but Freqtrade's maintainer reports Kraken minimums *"as high as
+  60$"* on some pairs, and stakes below the minimum cause trades to be **skipped
+  without an error**. At 1/3 of a $1,000 wallet (~$333) this is not binding, but
+  it is worth checking on any smaller allocation.
+- **The 1-day `CooldownPeriod` interacts with the superficial-loss rule.**
+  Re-entering a pair within 30 days of a stopped-out exit can **deny the capital
+  loss** under CRA's superficial-loss rule. Unquantified — flag it to an
+  accountant.
+- **Expected income at this size is small and should be stated plainly:**
+  $1,500 at the reported 9.4% CAGR is **~$141/yr ≈ $12/month**, before tax and
+  before the $10 withdrawal fee.
+- **A claim in this archive's own evidence set is false.**
+  `gh/` contains `Bananajoexxc/RegimeFilterStrategy`, which advertises a Calmar
+  ratio of **73.00**. Its own figures (+1,450% over 3.5 years → CAGR 118.8%)
+  imply Calmar **4.06**, and 73 contradicts its own stated Sharpe of 0.37 —
+  **18× overstated**. It is retained as evidence of what these repos claim, not
+  as a strategy.
 
 ## What is deliberately not committed here
 

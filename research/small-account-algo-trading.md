@@ -247,9 +247,9 @@ Verbatim abstract: *"We find that three factors – cryptocurrency market, size,
 - Long-short is **not available** on Kraken Canada (spot only, no shorting) [LOCAL: `config/canada_kraken.json` documents this].
 - **I verified the abstract only.** I did **not** verify whether the reported excess returns are net of realistic retail transaction costs, nor the holding periods or universe size. Do not cite this as "momentum works net of fees for a small account."
 
-### 4.3 Mean reversion
+### 4.3 Mean reversion — structural argument
 
-I found no peer-reviewed crypto-specific evidence I could verify that mean reversion survives Tier 1 fees. **[REASONING]** The structural argument is decisive regardless of evidence: mean reversion requires many round trips to harvest small deviations, and each round trip costs 0.90% of the position. A mean-reversion strategy needs to reliably capture >0.90% per round trip gross to break even. On daily candles that is possible; on intraday it is not.
+**[REASONING]** Mean reversion requires many round trips to harvest small deviations, and each round trip costs 0.90% of the position at Tier 1. A mean-reversion strategy must reliably capture >0.90% gross per round trip just to break even. On daily candles that is conceivable; on intraday it is not. **The empirical confirmation of this argument is in §4.6**, which measures the actual crypto reversal edge against actual fee levels and finds it roughly 60× too small. §4.6 is the evidence; this subsection is only the arithmetic that predicts it.
 
 ### 4.4 The general turnover law — the strongest transferable evidence
 
@@ -707,6 +707,62 @@ Verbatim findings:
 
 ---
 
+## 8b. Practical implications for this specific account
+
+Everything in this section is **[REASONING]** applied to verified inputs, except where a source is named.
+
+### 8b.1 Start with the arithmetic nobody quotes
+
+At the bot's own reported **9.4% CAGR**, a $1,500 account earns **~$141/year, or about $12/month** — before tax, before the flat **10 CAD** e-Transfer withdrawal fee (0.67% of the account, §1.6), and before the operator's time. At a *generous* 30% APY it would be **$37/month** ([PRACTITIONER] figure from the $2,000 post-mortem, §6b.2).
+
+**This is the decisive number, and it is not a strategy problem.** No fee optimisation, parameter change, or strategy swap alters the fact that the dollar amounts available at this account size are small. The rational purpose of running this bot therefore **cannot be income** — it must be one of: learning, entertainment, or a deliberate bet that a working edge now will be worth more on a larger account later. **[REASONING]** Being explicit about which of those it is determines what counts as success, and it is the single most useful thing the operator can decide.
+
+### 8b.2 What this bot's design already gets right — verified, not assumed
+
+This deserves stating plainly, because the rest of this report is critical. On the evidence gathered, several of the repo's core decisions are **correct and well-supported**:
+
+| Decision | Why the evidence supports it |
+|---|---|
+| **Daily candles, not 5m** | [LOCAL] The repo measures this as worth **+3.7pp**. [PEER-REVIEWED] Novy-Marx & Velikov's law (§4.4) puts the breakeven at ~0.80% gross per round trip; [PEER-REVIEWED] Borgards found a 5m crypto variant going from **+727% gross to −1164% net** (§4.5). Fee drag here is ~2.7%/yr — inside the survivable band. |
+| **Post-only maker orders** | [VERIFIED-URL] Maker 0.40% vs taker 0.80% per side = **0.80% saved per round trip** (§1.1). Over ~10 trades/yr at 30% stake that is **~2.4%/yr — about a quarter of the entire reported 9.41% CAGR.** This is the largest single cost lever available, and it is already pulled. (For comparison, the fee drag actually paid, ~2.7%/yr, is **just under a third** of that CAGR.) |
+| **`"fee": 0.0045` in the config** | [VERIFIED-URL] Nearly all published small-account fee math uses **0.1%**, understating Kraken by **4× (maker) to 8× (taker)** (§7.1). [LOCAL] The repo caught the ccxt default of 0.0026 being ~3× too optimistic. **This correction is one of the most valuable things in the repository.** |
+| **No hyperopt; pre-specified Turtle 20/10** | [PEER-REVIEWED] Harvey–Liu–Zhu: the hurdle for a newly discovered factor is **t > 3.0**, and ~71% of tried factors are discarded (§8.3b). [LOCAL] Using parameters chosen *before* the data is exactly the discipline that survives this. |
+| **Recording negative results** | [LOCAL] `turtle-risk-model-result.md` and the trailing-stop sweep are documented failures. Given §6b.4's reporting asymmetry, this is genuinely unusual and valuable. |
+| **Protections, and `stoploss_on_exchange: false`** | [LOCAL] Consistent with avoiding Kraken's market-order stops; §1.4's tiny spreads mean spread is not the reason, but the taker fee is. |
+
+**[REASONING] The repo has already solved the cost problem.** That is a real achievement and it is why §8.3's conclusion is *"the edge is unproven"* rather than *"the fees killed it."*
+
+### 8b.3 What remains genuinely unestablished
+
+**[REASONING] Only one thing: whether there is an edge.** 14 trades, Sharpe 0.14, and Freqtrade's own documentation labels a **77-trade, Sharpe-3.89** backtest as *"not distinguishable from luck"* (§8.3b). By the SQN-is-the-t-statistic identity, a realistic trend strategy needs roughly **200–1,000 trades**; at ~10 trades/year that is **20–100 years**.
+
+**[REASONING] The honest implication is uncomfortable:** at this trade frequency, **this account can never generate enough evidence to justify its own strategy by backtest.** Dry-run and live trading are the only sources of new information, and they accumulate ~10 trades/year. So the choice is not "backtest more" — [LOCAL] the trial budget is already spent — it is "accept a multi-year, unproven experiment" or "reframe the objective."
+
+### 8b.4 Concrete, evidence-linked actions
+
+Ordered by value-per-effort, all **[REASONING]** unless sourced:
+
+1. **Keep post-only. Never switch to market orders except for stops.** Worth ~0.80%/round trip (§1.1). Note [LOCAL] the repo's own finding that *"the Donchian exit almost always fires before either stop"* — which means the taker rate is rarely paid, so the effective blended cost is closer to 0.80% than 0.90%.
+2. **Fund only by Interac e-Transfer. Never by debit card.** [VERIFIED-URL] e-Transfer deposit is **free**; debit card costs **0.25 CAD + 3.75%** — about **$56 on a $1,500 deposit**, which is ~4 round trips' worth of fees (§1.6).
+3. **Do not trade to reach Tier 2.** Each extra round trip costs **0.90%** to save at most **0.20%** (§7). The tier is not reachable by trading profitably; it is reachable by growing the account or not at all.
+4. **Always report buy-and-hold on the identical window.** §8.2 shows the same +13.67% reading as a triumph or a failure depending only on the start date. Without this benchmark the number is uninterpretable.
+5. **Verify the effective minimum stake on all four pairs empirically.** [PRACTITIONER] Freqtrade's maintainer reports minimum stakes *"as high as 60$"* on Kraken, 6–19× above what `ordermin` implies (§1.3). With `max_open_trades: 3` and `tradable_balance_ratio: 0.90`, stakes are ~$300–600, so the margin is real but not large — and the failure mode is **silently skipped trades**, not an error.
+6. **Check whether the 1-candle `CooldownPeriod` creates a superficial-loss problem.** [VERIFIED-URL] A loss is denied if identical property is re-bought within **30 days** (§1.5). Re-entering a stopped-out pair the next day capitalises the loss into the new ACB instead of deducting it. **[REASONING] I have not quantified this and I am not recommending a change** — lengthening the cooldown alters strategy behaviour and could cost more in missed trades than it saves in tax. It is worth *knowing*.
+7. **Set a time budget and a decision rule in advance.** [PEER-REVIEWED] Given IS→OOS Sharpe **R² = 0.02** across 888 real algorithms (§8.3c), no amount of backtesting will settle this. A pre-committed rule — e.g. "if dry-run/live has not produced a positive expectancy after N trades spanning M years, stop" — is the only protection against the persistence the Brazil study documents (*"no evidence of learning"*, §5.2).
+8. **Consider what the evidence says the realistic alternatives are.** [PEER-REVIEWED] Hudson & Urquhart found only **4.96–15.69% of ~15,000 rules beat buy-and-hold on raw return**, and Bitcoin had **no out-of-sample predictability** (§5.1c). [PEER-REVIEWED] El Bernoussi & Rockinger put the rebalancing premium at **~1.35bp/year** (§4.7). **[REASONING]** If the objective is **return**, the evidence favours simply holding. If the objective is **drawdown reduction**, both this bot and periodic rebalancing deliver it — and rebalancing does so at **~0.25%/year** in fee drag versus the bot's ~2.7%, with no parameter risk. **The bot's defensible niche is drawdown reduction with an unproven return, and it is worth being honest that this is a narrow niche.**
+
+### 8b.5 What would change my assessment
+
+**[REASONING]** Stated so the conclusion is falsifiable rather than merely sceptical:
+- **A pre-registered out-of-sample result** on data not used for any parameter choice, with the trial count disclosed.
+- **Enough trades for t > 3.0** — realistically 200+, accumulated in dry-run/live, not backtest.
+- **A buy-and-hold benchmark reported alongside, across multiple start dates**, showing the bot wins on return and not only on drawdown.
+- **Confirmation that live fills match backtest fills.** [VERIFIED-URL] Freqtrade's docs state backtests assume *"no slippage"* and that backtesting *"will never replace running a strategy in dry-run mode."* Post-only orders face adverse selection, which no backtest models.
+
+None of these is impossible. All of them take years at ~10 trades/year. That timescale — not the fee schedule — is the real constraint on this account.
+
+---
+
 ## 9. What I could NOT verify (do not treat these as established)
 
 Stated plainly, because filling these gaps with plausible numbers would be worse than leaving them open:
@@ -732,6 +788,10 @@ Stated plainly, because filling these gaps with plausible numbers would be worse
 16. **Body text of "Learning, Fast or Slow" (RAPS 2019)** and of **BIS WP 1049** — the 97% and 73–81% figures come from publisher metadata / the BIS page summary respectively, not from the full documents. The **BIS Bulletin 69** figures were verified from the PDF itself.
 17. **ASIC Report 693** — I originally listed it as a candidate CFD source in my research plan; the thread disproved that. **REP 693 is not the CFD report**; the correct source is **REP 626**. Corrected in §5.1.
 18. **Constantinides (1979)** full text — JSTOR blocked; abstract only. **Sharpe (1991)** and **Grossman–Stiglitz** were not fetched by the strategy thread, so the limits-to-arbitrage argument in §4.4 rests on the verified Novy-Marx & Velikov quotation rather than the originals. *(I did personally verify Sharpe 1991 in full — see §5.3.)*
+19. **A source discrepancy I could not resolve:** the "**73–81% of crypto investors lost money**" figure is attributed to **BIS WP 1049**, but a thread reports it is **not** in BIS Bulletin 69, and that BIS WP 1049's body was verified only from the BIS page summary. **The attribution is unresolved**; treat the number as page-summary-level evidence, not full-text.
+20. **Reddit, Discord, and Freqtrade GitHub Discussions were not examined** — Reddit was inaccessible from this environment, Discord is not archivable, and `freqtrade/freqtrade/discussions` returns HTTP 404. **Consequence: community self-reports of small-account outcomes are absent from this report**, which means §6b.1's "zero verified track records" is a statement about *auditable* records, not proof that no one has succeeded.
+21. **The eToro / *Journal of Financial Economics* retail-crypto paper** was 403-blocked and unread. **Prop-firm pass rates** were searched for and not verified. **No crypto-specific bot-survival study appears to exist.**
+22. **The base rate of backtest survival is genuinely unknown.** The popular "87%" and "90% of backtested strategies fail" figures are **unsourced folklore** — the thread verified this by reading both pages that circulate them (§8.3c). I therefore state the *mechanism* (low IS→OOS R², high PBO under search) and explicitly decline to give a percentage.
 
 ---
 
@@ -775,6 +835,31 @@ Stated plainly, because filling these gaps with plausible numbers would be worse
 - <https://arxiv.org/pdf/2608.21888> — Kitron & Wengrowicz (2026), mean reversion fails on fees
 - <https://static.twentyoverten.com/5980d16bbfb1c93238ad9c24/rJpQmY8o7/Dollar-Cost-Averaging-Just-Means-Taking-Risk-Later-Vanguard.pdf> — Vanguard (2012), DCA vs lump sum
 - <https://www.nber.org/system/files/working_papers/w24877/w24877.pdf> — Liu & Tsyvinski, crypto time-series momentum
+
+**Verified by delegated threads in this session (further sources):**
+- <https://www.freqtrade.io/en/stable/backtesting/> — **Freqtrade's own p-value/SQN warning and its 77-trade "$1,000 account" example with p=0.4768**
+- <https://raw.githubusercontent.com/freqtrade/freqtrade/develop/docs/faq.md> — *"12 trades is just not enough to say anything"*
+- <https://people.duke.edu/~charvey/Research/Published_Papers/P118_and_the_cross.PDF> — Harvey, Liu & Zhu (2016), **t > 3.0 hurdle**, 71.1% of factors discarded
+- <https://www.davidhbailey.com/dhbpapers/sharpe-frontier.pdf> — Minimum Track Record Length (2.73 years for Sharpe 2)
+- <https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf> — Probability of Backtest Overfitting (8,800 random-walk configs → Sharpe 1.27, PBO 55%)
+- <https://community.portfolio123.com/uploads/short-url/3WHpAUOzhCG8QAUez71HpoWnA62.pdf> — **Wiecki et al., 888 Quantopian algorithms, IS→OOS Sharpe R² = 0.02**
+- <https://www.nber.org/papers/w19891> — Pástor, Stambaugh & Taylor, "Scale and Skill" (**large-fund diseconomies**)
+- <https://www.nber.org/papers/w20700> — Pástor, Stambaugh & Taylor, "Do Funds Make More When They Trade More?" (**turnover positively related to return**)
+- <https://eprints.lancs.ac.uk/id/eprint/205305/1/JEF_final_copy.pdf> — Qiao et al. (2023), fee-drag formula and no-trade-band solutions
+- <https://support.kraken.com/articles/12425041458708-cost-minimum-for-trading> — Kraken cost minimum (1 CAD)
+- <https://support.kraken.com/articles/360000381846> — Kraken Canada deposit fees (**debit card 0.25 + 3.75%**)
+- <https://support.kraken.com/articles/360000423043> — Kraken Canada withdrawal fees (**e-Transfer flat 10 CAD**)
+- <https://github.com/freqtrade/freqtrade/issues/7120> — maintainer on Kraken minimum stakes *"as high as 60$"*
+- <https://github.com/francisx1999/crypto-trading-bot-postmortem> — $2,000 post-mortem, 7 strategies all negative
+- <https://raw.githubusercontent.com/Bananajoexxc/RegimeFilterStrategy-Freqtrade/main/README.md> — **the Calmar 73.00 claim I disproved by arithmetic** (also in this repo's `research/gh/`)
+- <https://www.bis.org/publications/bulletin-69-crypto-shocks-and-retail-losses.pdf> — BIS Bulletin 69
+- <https://www.esma.europa.eu/press-news/esma-news/esma-agrees-prohibit-binary-options-and-restrict-cfds-protect-retail-investors> — ESMA press release, the 74–89% figure
+- <https://www.fca.org.uk/publication/consultation/cp16-40.pdf> — FCA CP16/40
+- <https://download.asic.gov.au/media/5241548/rep626-published-22-august-2019.pdf> — ASIC REP 626
+
+**Explicitly NOT to be cited (unsourced folklore, verified as such):**
+- "**87%** of backtested strategies fail" and "**90%** of trading bots fail" — the pages circulating these cite sources that do not contain the figures (§8.3c)
+- "**0.25% maker / 0.40% taker**" as Kraken's base rate — **stale**; the current Tier 1 is 0.40%/0.80% (§1.1)
 
 **Cited by this repo and re-verified by me in this session (PDF fetched and text-extracted):** the two López de Prado/Bailey items above. The repo's own `research/strategy-count-and-overfitting-sources.md` contains a much fuller, independently verified treatment of this literature and its URLs.
 
