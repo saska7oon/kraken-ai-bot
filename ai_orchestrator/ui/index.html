@@ -290,6 +290,18 @@ header{
   background:rgba(0,0,0,.3);border:1px solid var(--line);color:var(--text-1);text-align:right;
 }
 .set-input:focus{outline:none;border-color:rgba(96,165,250,.55)}
+/* The strategy picker holds a class name, so it is wider and left-aligned: the
+   right-aligned numeric styling above exists for numbers and reads as broken on
+   a name like ModerateMultiPairStrategy. */
+select.set-input{width:auto;min-width:210px;text-align:left;font-size:12.2px;cursor:pointer}
+select.set-input option{background:#141821;color:var(--text-1)}
+/* A queued strategy change is a state the bot is in, not a notice - so it gets a
+   card rather than a toast, and it stays until it resolves or is cancelled. */
+.pending-card{
+  margin-top:14px;padding:13px;border-radius:12px;
+  border:1px solid rgba(251,191,36,.34);background:rgba(251,191,36,.06);
+}
+.pending-card .btn{margin-top:10px}
 .set-help{font-size:11.8px;color:var(--text-3);margin-top:5px;line-height:1.5}
 .mode-box{
   display:flex;align-items:center;gap:12px;padding:13px;border-radius:12px;
@@ -1373,7 +1385,37 @@ async function loadSettings() {
     box.appendChild(el("div", "set-help",
       "Each one has a safe range. Values outside it are refused rather than clamped, "
       + "so nothing changes silently."));
-    editable.forEach(x => box.appendChild(settingRow(x)));
+    editable.forEach(x => box.appendChild(settingRow(x, d)));
+  }
+
+  /* -- a strategy change waiting for positions to close -- */
+  const pending = d.pending_strategy || {};
+  if (pending.queued) {
+    const card = el("div", "pending-card");
+    card.appendChild(el("div", "set-label",
+      "Waiting to switch to " + pending.strategy));
+    card.appendChild(el("div", "set-help",
+      "The bot has stopped opening new positions so it can switch safely. "
+      + "It will change by itself once the last open position closes \u2014 "
+      + "usually within the hour, but it can take longer. Existing positions "
+      + "are still being managed normally."));
+    if (pending.open_trades_at_request !== undefined) {
+      card.appendChild(el("div", "set-help",
+        "Positions open when you asked: " + pending.open_trades_at_request));
+    }
+    const cancel = el("button", "btn btn-sm", "Cancel the switch");
+    cancel.onclick = async () => {
+      try {
+        const r = await api("/api/v1/settings/strategy/cancel", { method: "POST" });
+        toast(r.message || "Cancelled.", r.cancelled ? null : "bad");
+        await refreshAll(false);
+      } catch (e) {
+        if (e.auth) return signOut(e.message);
+        toast(e.message, "bad");
+      }
+    };
+    card.appendChild(cancel);
+    box.appendChild(card);
   }
 
   /* -- disagreement between the file and the running bot -- */
@@ -1383,7 +1425,7 @@ async function loadSettings() {
   $("settings-undo").style.display = d.has_backup ? "" : "none";
 }
 
-function settingRow(x) {
+function settingRow(x, d) {
   const row = el("div", "set-row");
   const top = el("div", "set-top");
   top.appendChild(el("div", "set-label", x.label));
@@ -1393,6 +1435,33 @@ function settingRow(x) {
     const b = el("button", "btn btn-sm", current ? "On" : "Off");
     b.onclick = () => saveSettings({ [x.key]: !current }, null, x.label + " updated.");
     top.appendChild(b);
+  } else if (x.kind === "strategy") {
+    /* A list, not a text box. A typed strategy name that does not exist is
+       refused - but only after the operator has committed to it, and a name that
+       is merely misspelled looks exactly like one that is not installed. The
+       list can only contain strategies that are actually present. */
+    const names = (d && d.available_strategies) || [];
+    if (!names.length) {
+      row.appendChild(top);
+      row.appendChild(el("div", "set-help",
+        "No strategies are available to choose from. The strategies folder is "
+        + "empty, which usually means the stack has not finished starting."));
+      return row;
+    }
+    const sel = el("select", "set-input");
+    sel.setAttribute("aria-label", x.label);
+    names.forEach(n => {
+      const o = el("option", null, n);
+      o.value = n;
+      if (n === current) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = () => {
+      const chosen = sel.value;
+      if (chosen === current) return;
+      saveSettings({ [x.key]: chosen }, null, x.label + " updated.");
+    };
+    top.appendChild(sel);
   } else {
     const input = el("input", "set-input");
     input.type = "text";
@@ -1425,7 +1494,14 @@ async function saveSettings(settings, confirmation, okMsg) {
       method: "POST",
       body: { settings: settings, confirmation: confirmation || null },
     });
-    toast(r.summary || okMsg || "Saved.", r.applied === false ? "bad" : null);
+    /* A queued strategy change reports applied:false, but it is not a failure -
+       it is the bot doing the right thing and waiting. Showing it in the error
+       colour would train the operator to read a correct outcome as a problem. */
+    const queued = r.strategy && r.strategy.queued;
+    const msg = queued
+      ? (r.strategy.message || "Queued until open positions close.")
+      : (r.summary || okMsg || "Saved.");
+    toast(msg, queued ? "warn" : (r.applied === false ? "bad" : null));
     if (r.audit_note) toast(r.audit_note, "bad");
     await refreshAll(false);
   } catch (e) {

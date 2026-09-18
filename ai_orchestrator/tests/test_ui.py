@@ -285,6 +285,11 @@ _CORE_MODULES = {
     # the panel therefore always claimed the AI had written text the bot had
     # computed itself.
     "explainer": pathlib.Path(__file__).resolve().parents[1] / "plugins" / "explainer.py",
+    # The strategy-cancel route returns this module's result, so without it here
+    # the handler resolved to only the keys it writes by hand - the `actor` in its
+    # audit call - and the UI's reads of `cancelled` and `message` were reported as
+    # fields that do not exist. They do.
+    "strategy_switch": pathlib.Path(__file__).resolve().parents[1] / "core" / "strategy_switch.py",
 }
 
 
@@ -604,6 +609,14 @@ def main() -> int:
         # call them, which test_settings.py asserts separately.
         "/api/v1/settings", "/api/v1/settings/preset", "/api/v1/settings/undo",
         "/api/v1/settings/reset-dryrun",
+        # Dropping a queued strategy change and resuming the bot on the strategy
+        # it is already running. A deliberate operator action, with the same
+        # standing as the other settings writes: reachable only from the
+        # authenticated settings route, never from the AI.
+        #
+        # It cannot be used to change the strategy - it only ever discards a
+        # queued change and clears the pause - so it adds no capability.
+        "/api/v1/settings/strategy/cancel",
         # Starting, pausing and stopping the bot. A deliberate operator action
         # from the control panel. It is its own endpoint rather than a phrase
         # sent to /api/v1/command because intent parsing should not stand
