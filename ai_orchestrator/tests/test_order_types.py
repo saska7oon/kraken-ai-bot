@@ -62,6 +62,12 @@ KRAKEN_TIER1_TAKER = 0.008
 #: "same" on a long entry is the bid; "same" on a long exit is the ask.
 RESTING_SIDE = {"entry_pricing": "same", "exit_pricing": "same"}
 
+#: What freqtrade/exchange/kraken.py declares it accepts:
+#:     "order_time_in_force": ["GTC", "IOC", "PO"]
+#: freqtrade raises ConfigurationError if a configured value is not in this list,
+#: so "PO" only works because Kraken declares it.
+KRAKEN_TIME_IN_FORCE = ("GTC", "IOC", "PO")
+
 FAILURES: list[str] = []
 CHECKS = 0
 
@@ -121,6 +127,37 @@ def main() -> int:
             isinstance(val, (int, float)) and val > 0,
             f"is {val!r}",
         )
+
+    print("\nPost Only is set, so the maker rate is guaranteed not hoped for:")
+    tif = cfg.get("order_time_in_force") or {}
+    for leg in ("entry", "exit"):
+        check(
+            f"order_time_in_force.{leg} is 'PO'",
+            str(tif.get(leg, "")).upper() == "PO",
+            f"is {tif.get(leg)!r} — without PO a limit order can still cross the "
+            "spread if the market moves between reading the book and submitting, "
+            f"and be charged {KRAKEN_TIER1_TAKER*100:.2f}% instead of "
+            f"{KRAKEN_TIER1_MAKER*100:.2f}%",
+        )
+    # PO is only valid if the exchange declares it. freqtrade raises
+    # ConfigurationError otherwise, so this pins the reason it works.
+    check(
+        "Kraken declares PO support",
+        "PO" in KRAKEN_TIME_IN_FORCE,
+        f"freqtrade/exchange/kraken.py declares {KRAKEN_TIME_IN_FORCE}",
+    )
+    check(
+        "every configured value is one Kraken accepts",
+        all(str(v).upper() in KRAKEN_TIME_IN_FORCE for v in tif.values()),
+        f"{tif} vs {KRAKEN_TIME_IN_FORCE}",
+    )
+    # A post-only STOPLOSS would be rejected when it matters most.
+    check(
+        "stoploss is NOT post-only (it must actually fill)",
+        ot.get("stoploss") == "market",
+        f"stoploss is {ot.get('stoploss')!r} — a rejected stoploss leaves the "
+        "position open through the loss it was meant to prevent",
+    )
 
     print("\nThe simulated fee is not below the floor:")
     check("fee is present", fee is not None, "absent")

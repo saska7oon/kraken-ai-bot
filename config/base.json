@@ -280,6 +280,55 @@
     },
 
     // -------------------------------------------------------------------------
+    // ORDER TIME IN FORCE - this is what GUARANTEES the maker rate
+    // -------------------------------------------------------------------------
+    // "PO" is Post Only. Kraken rejects the order outright if it would cross the
+    // spread, so the order can never be charged the taker rate. You either get
+    // the maker rate or you get no fill - never 0.80%.
+    //
+    // WHY THIS IS NEEDED ON TOP OF order_types "limit":
+    //
+    // A limit order is not automatically a maker order. What decides it is
+    // whether the order RESTS on the book or CROSSES the spread. With price_side
+    // "same" it rests - but only at the price the bot read a moment ago. Between
+    // reading the book and Kraken receiving the order, the market can move. A buy
+    // limit priced at what WAS the bid can arrive above the new ask, cross, and
+    // be filled as a taker at 0.80% instead of 0.40%.
+    //
+    // That is a silent doubling of the fee on exactly the trades where the market
+    // moved against you - the worst possible moment for it. Post Only removes the
+    // possibility: the exchange refuses the crossing order rather than filling it
+    // at the wrong rate.
+    //
+    // Verified supported. freqtrade/exchange/kraken.py declares
+    //     "order_time_in_force": ["GTC", "IOC", "PO"]
+    // and maps it to ccxt's postOnly flag:
+    //     if time_in_force == "PO":
+    //         params.pop("timeInForce", None)
+    //         params["postOnly"] = True
+    //
+    // THE COST, stated plainly: post-only orders are rejected when they would
+    // cross, so some entries never happen. This bot will trade LESS often than one
+    // using market orders. That is the deliberate trade - fewer trades at half the
+    // fee, rather than more trades at double it.
+    //
+    // Rejections are not fatal. ccxt raises InvalidOrder, freqtrade wraps it in
+    // InvalidOrderException, and the entry loop catches it:
+    //     except DependencyException as exception:
+    //         logger.warning("Unable to create trade for %s: %s", ...)
+    // because InvalidOrderException inherits ExchangeError -> DependencyException.
+    // The trade is skipped, a warning is logged, and the bot carries on.
+    //
+    // Exits are post-only too, so the same reasoning applies on the way out.
+    // stoploss and emergency_exit stay MARKET orders - see order_types above. A
+    // stoploss must actually fill, and a rejected stoploss would leave the
+    // position open through the very loss it was meant to prevent.
+    "order_time_in_force": {
+        "entry": "PO",
+        "exit": "PO"
+    },
+
+    // -------------------------------------------------------------------------
     // TIMEFRAME
     // -------------------------------------------------------------------------
     // 1h, not 5m. See the fee block above and the strategy's `timeframe` for the
