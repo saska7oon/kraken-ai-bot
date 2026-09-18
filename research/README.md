@@ -14,6 +14,7 @@ repeating it.
 | `regime-strategies-report.md` | 666 | Strategies organised by market regime, with exact rules. **Scoped to a 5-minute timeframe this bot no longer uses.** |
 | `strategy-count-and-overfitting-sources.md` | 782 | How many configurations a small account can afford to test, with peer-reviewed numbers. |
 | `freqtrade-strategy-repos-report.md` | 574 | Inventory of public Freqtrade strategy repos, verified via the GitHub API. **An inventory, not an evaluation.** |
+| `turtle-risk-model-result.md` | 156 | **A negative result.** Completing the published Turtle system (ATR stop + risk-based sizing) was measured across a full 2×2 and made the strategy worse in every cell. Read this before proposing another strategy change. |
 | `gh/` | — | The primary-source evidence the reports cite: upstream READMEs, licences, the NFI trading-modes doc, and file listings. |
 
 Every claim in the reports carries an evidence label — `[VERIFIED-URL]`,
@@ -43,11 +44,17 @@ is a **~1,400× overrun** of that budget.
 
 **This is a hard constraint, not advice.** Every parameter sweep, every
 alternative strategy, and every regime variation spends from the same budget.
-As of this writing the budget has been overrun — a sweep of 8 parameter sets ×
-3 trailing-stop modes was run to settle the trailing-stop question. That sweep
-found 15/8 beating the shipped 20/10, which is the *expected* result of a sweep
-and is why 20/10 (the published Turtle parameter) is still the shipped value.
-**Do not switch to a sweep winner.**
+As of this writing the budget has been overrun twice over — a sweep of 8
+parameter sets × 3 trailing-stop modes to settle the trailing stop, and 4 more
+configurations to test the Turtle risk model. The sweep found 15/8 beating the
+shipped 20/10, which is the *expected* result of a sweep and is why 20/10 (the
+published Turtle parameter) is still the shipped value. **Do not switch to a
+sweep winner.**
+
+The Turtle experiment is written up in `turtle-risk-model-result.md`. It is a
+negative result: the shipped configuration won all four cells, so the strategy
+was reverted and the published system was *not* adopted. That file exists so the
+same ground is not covered twice.
 
 Before running another sweep, read §5 of `strategy-count-and-overfitting-sources.md`
 and use a held-out `--timerange` that has never been optimised on.
